@@ -1,0 +1,807 @@
+"""The shared experimental harness.
+
+Everything in this module is held constant across the three feature extraction
+techniques. Preprocessing, segmentation, the train/test partition, the
+cross-validation folds, the augmentation plan, and the classifier pipeline are
+produced here and here only, so that the descriptor family remains the single
+experimental variable.
+
+A technique receives a preprocessed image and a fruit mask, and returns a
+fixed-length vector. It is handed copies of both arrays, has no reference to
+the configuration or to the harness, and therefore cannot influence any other
+stage of the experiment.
+
+Pipeline order for one sample::
+
+    read -> (augment, training only) -> preprocess -> segment -> extract
+
+Augmentation is deliberately applied to the raw image, before preprocessing,
+so that a brightness-jittered variant is genuinely put through the same CLAHE
+illumination normalisation that a real image would be.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterator, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
+
+import cv2
+import numpy as np
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+
+from config import Config, get_config
+from data import ImageRecord, labels_of, read_image
+
+# A technique is any callable matching this signature. Fixed for all three.
+FeatureFunction = Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
+@runtime_checkable
+class FeatureExtractorLike(Protocol):
+    """Structural type the harness requires of a feature extraction technique.
+
+    Declared structurally, and deliberately not imported from the ``features``
+    package, so that the harness has no dependency on any concrete technique
+    and the coupling runs in one direction only.
+    """
+
+    short_name: str
+    dim: int
+
+    def __call__(
+        self,
+        bgr_image: np.ndarray,
+        fruit_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Return a fixed-length 1-D descriptor for one segmented fruit."""
+        ...
+
+
+# --------------------------------------------------------------------------- #
+# Reproducibility
+# --------------------------------------------------------------------------- #
+
+def set_global_seed(config: Optional[Config] = None) -> int:
+    """Seed every random source the experiment touches.
+
+    scikit-learn estimators additionally receive ``random_state`` explicitly;
+    this function covers the module-level generators that some library code
+    falls back on.
+
+    Returns:
+        The seed that was applied.
+    """
+    cfg = config or get_config()
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    return cfg.seed
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1: preprocessing
+# --------------------------------------------------------------------------- #
+
+def preprocess(image_bgr: np.ndarray, config: Optional[Config] = None) -> np.ndarray:
+    """Apply the shared preprocessing chain to one BGR image.
+
+    The three steps, in order, are:
+
+    1. resize to the configured size (224 x 224);
+    2. Gaussian blur with the configured kernel (5 x 5) for noise suppression;
+    3. conversion to CIE L*a*b*, CLAHE on the L* channel only, conversion back
+       to BGR. Restricting equalisation to L* normalises illumination without
+       disturbing the a* and b* chromaticity that the colour descriptors read.
+
+    Args:
+        image_bgr: An ``(H, W, 3)`` ``uint8`` BGR image.
+        config: Optional configuration override.
+
+    Returns:
+        A new ``(224, 224, 3)`` ``uint8`` BGR image. The input is not modified.
+    """
+    cfg = config or get_config()
+    pre = cfg.preprocess
+
+    if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
+        raise ValueError(f"Expected an (H, W, 3) BGR image; got shape {image_bgr.shape}")
+
+    resized = cv2.resize(image_bgr, pre.resize, interpolation=cv2.INTER_AREA)
+    blurred = cv2.GaussianBlur(resized, pre.gaussian_kernel, pre.gaussian_sigma)
+
+    lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB)
+    lightness, green_red, blue_yellow = cv2.split(lab)
+    clahe = cv2.createCLAHE(
+        clipLimit=pre.clahe_clip_limit,
+        tileGridSize=pre.clahe_tile_grid,
+    )
+    equalised = clahe.apply(lightness)
+    merged = cv2.merge((equalised, green_red, blue_yellow))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: segmentation
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class SegmentationResult:
+    """The fruit mask and its derived geometry for one image.
+
+    Attributes:
+        mask: ``(H, W)`` ``uint8`` mask, 255 inside the fruit and 0 outside.
+        bbox: ``(x, y, w, h)`` bounding box of the retained component.
+        contour: ``(N, 1, 2)`` array of the outer contour points.
+        coverage: Fraction of the frame the mask occupies, in ``[0, 1]``.
+        polarity: Which side of the Otsu threshold was taken as fruit.
+        threshold: The Otsu threshold value chosen on the V channel.
+        failed: True when the mask fell outside the permitted coverage bounds.
+        reason: Explanation when ``failed`` is True, otherwise an empty string.
+        substituted: True when a fallback elliptical mask replaced the result.
+    """
+
+    mask: np.ndarray
+    bbox: Tuple[int, int, int, int]
+    contour: np.ndarray
+    coverage: float
+    polarity: str
+    threshold: float
+    failed: bool = False
+    reason: str = ""
+    substituted: bool = False
+
+
+def _largest_component(binary: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """Keep only the largest non-background connected component.
+
+    Args:
+        binary: ``(H, W)`` ``uint8`` image with foreground at 255.
+
+    Returns:
+        A tuple of the single-component mask and its ``(x, y, w, h)`` box. When
+        the input is entirely background, an all-zero mask and a zero box are
+        returned.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if count <= 1:  # Label 0 is the background, so there is nothing to keep.
+        return np.zeros_like(binary), (0, 0, 0, 0)
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    winner = int(np.argmax(areas)) + 1
+    mask = np.where(labels == winner, 255, 0).astype(np.uint8)
+    box = (
+        int(stats[winner, cv2.CC_STAT_LEFT]),
+        int(stats[winner, cv2.CC_STAT_TOP]),
+        int(stats[winner, cv2.CC_STAT_WIDTH]),
+        int(stats[winner, cv2.CC_STAT_HEIGHT]),
+    )
+    return mask, box
+
+
+def _border_touch_fraction(mask: np.ndarray) -> float:
+    """Fraction of the frame border occupied by the mask.
+
+    A correctly segmented fruit sits away from the edges, whereas an inverted
+    mask (background taken as foreground) hugs the whole border. This is the
+    statistic the automatic polarity choice is made on.
+    """
+    top, bottom = mask[0, :], mask[-1, :]
+    left, right = mask[:, 0], mask[:, -1]
+    border = np.concatenate([top, bottom, left, right])
+    return float(np.count_nonzero(border) / border.size)
+
+
+def _outer_contour(mask: np.ndarray) -> np.ndarray:
+    """Return the largest external contour of ``mask``, or an empty array."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.empty((0, 1, 2), dtype=np.int32)
+    return max(contours, key=cv2.contourArea)
+
+
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill interior holes so the mask is the solid fruit silhouette.
+
+    A dark blemish on a fruit photographed against a dark background falls on
+    the background side of the Otsu threshold, and a 5 x 5 closing is far too
+    small to bridge it. The blemish is then punched out of the fruit mask as a
+    hole - which is precisely backwards, because T3 reports blemish ratio as
+    blemished pixels over mask pixels, and pixels outside the mask are never
+    examined. Left unfilled, the most severely rotten fruit would report the
+    least blemishing, and the same fruit would yield a different mask on a
+    light background than on a dark one.
+
+    Filling the region enclosed by the outer contour removes that asymmetry.
+    It is applied inside the shared harness, so every technique sees the same
+    silhouette.
+    """
+    contour = _outer_contour(mask)
+    if contour.size == 0:
+        return mask
+    filled = np.zeros_like(mask)
+    cv2.drawContours(filled, [contour], -1, 255, thickness=cv2.FILLED)
+    return filled
+
+
+def _fallback_mask(shape: Tuple[int, int]) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """Build a centred elliptical mask covering the middle of the frame.
+
+    Used only when ``segmentation.on_failure`` is ``"fallback"``. The ellipse
+    spans 70% of each dimension, which is a plausible extent for a centred
+    fruit but is emphatically not a real segmentation.
+    """
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    centre = (width // 2, height // 2)
+    axes = (int(width * 0.35), int(height * 0.35))
+    cv2.ellipse(mask, centre, axes, 0, 0, 360, 255, thickness=-1)
+    box = (centre[0] - axes[0], centre[1] - axes[1], axes[0] * 2, axes[1] * 2)
+    return mask, box
+
+
+def segment_fruit(
+    image_bgr: np.ndarray,
+    config: Optional[Config] = None,
+) -> SegmentationResult:
+    """Segment the fruit from the background.
+
+    The chain is Otsu thresholding on the HSV value channel, morphological
+    closing with a 5 x 5 structuring element to fill specular holes, and
+    retention of the largest connected component.
+
+    With ``segmentation.polarity`` set to ``"auto"`` both sides of the Otsu
+    threshold are evaluated and the one whose largest component touches the
+    frame border least is kept, which handles light and dark backgrounds
+    alike. The decision is made here, in the shared harness, so it is identical
+    for every technique.
+
+    A mask covering less than ``min_mask_fraction`` or more than
+    ``max_mask_fraction`` of the frame is flagged as a segmentation failure
+    rather than being passed silently to a feature extractor.
+
+    Args:
+        image_bgr: A preprocessed ``uint8`` BGR image.
+        config: Optional configuration override.
+
+    Returns:
+        A :class:`SegmentationResult`.
+    """
+    cfg = config or get_config()
+    seg = cfg.segmentation
+
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    value = hsv[:, :, 2]
+
+    threshold, bright = cv2.threshold(
+        value, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    dark = cv2.bitwise_not(bright)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, seg.close_kernel)
+
+    candidates = {}
+    for name, binary in (("bright", bright), ("dark", dark)):
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        mask, box = _largest_component(closed)
+        if seg.fill_holes:
+            mask = _fill_holes(mask)
+        candidates[name] = (mask, box)
+
+    if seg.polarity == "auto":
+        def _rank(name: str) -> Tuple[int, float, int]:
+            """Order candidates: plausible coverage first, then away from the border.
+
+            The two Otsu sides are complements, so whenever one covers almost
+            the whole frame the other covers almost none. Ranking plausible
+            coverage first stops a degenerate empty mask winning purely by
+            never touching the border.
+            """
+            mask = candidates[name][0]
+            coverage = np.count_nonzero(mask) / mask.size
+            in_bounds = seg.min_mask_fraction <= coverage <= seg.max_mask_fraction
+            return (
+                0 if in_bounds else 1,
+                _border_touch_fraction(mask),
+                -int(np.count_nonzero(mask)),
+            )
+
+        chosen = min(candidates, key=_rank)
+    else:
+        chosen = seg.polarity
+
+    mask, box = candidates[chosen]
+    coverage = float(np.count_nonzero(mask) / mask.size)
+
+    failed = coverage < seg.min_mask_fraction or coverage > seg.max_mask_fraction
+    reason = ""
+    substituted = False
+    if failed:
+        bound = "below" if coverage < seg.min_mask_fraction else "above"
+        reason = (
+            f"mask covers {coverage:.1%} of the frame, {bound} the permitted "
+            f"{seg.min_mask_fraction:.0%}-{seg.max_mask_fraction:.0%} range"
+        )
+        if seg.on_failure == "fallback":
+            mask, box = _fallback_mask(mask.shape)
+            coverage = float(np.count_nonzero(mask) / mask.size)
+            substituted = True
+
+    return SegmentationResult(
+        mask=mask,
+        bbox=box,
+        contour=_outer_contour(mask),
+        coverage=coverage,
+        polarity=chosen,
+        threshold=float(threshold),
+        failed=failed,
+        reason=reason,
+        substituted=substituted,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3: augmentation (training partition only)
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class AugmentationOp:
+    """One deterministic augmentation of a single training image.
+
+    Attributes:
+        flip: Whether to mirror the image horizontally.
+        angle: Rotation in degrees about the image centre.
+        brightness: Multiplicative gain applied to every channel.
+    """
+
+    flip: bool
+    angle: float
+    brightness: float
+
+    @property
+    def is_identity(self) -> bool:
+        """True when this operation would leave the image unchanged."""
+        return not self.flip and self.angle == 0.0 and self.brightness == 1.0
+
+
+IDENTITY_OP = AugmentationOp(flip=False, angle=0.0, brightness=1.0)
+
+
+def apply_augmentation(image_bgr: np.ndarray, op: AugmentationOp) -> np.ndarray:
+    """Apply one augmentation operation to a raw BGR image.
+
+    Rotation uses replicated borders rather than zero padding, so that no
+    artificial black corners are introduced for Otsu to mistake for fruit.
+
+    Args:
+        image_bgr: A ``uint8`` BGR image.
+        op: The operation to apply.
+
+    Returns:
+        A new ``uint8`` BGR image of the same shape. The input is unchanged.
+    """
+    if op.is_identity:
+        return image_bgr.copy()
+
+    output = image_bgr
+    if op.flip:
+        output = cv2.flip(output, 1)
+
+    if op.angle != 0.0:
+        height, width = output.shape[:2]
+        centre = (width / 2.0, height / 2.0)
+        rotation = cv2.getRotationMatrix2D(centre, op.angle, 1.0)
+        output = cv2.warpAffine(
+            output,
+            rotation,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+
+    if op.brightness != 1.0:
+        output = cv2.convertScaleAbs(output, alpha=op.brightness, beta=0)
+
+    return np.ascontiguousarray(output)
+
+
+def build_augmentation_plan(
+    n_images: int,
+    config: Optional[Config] = None,
+) -> List[List[AugmentationOp]]:
+    """Draw the augmentation operations for every training image, once.
+
+    The plan is generated from the fixed seed in a fixed traversal order, so it
+    is byte-for-byte identical every run and across all three techniques. The
+    identity operation always heads each image's list, so the original image is
+    always retained alongside its variants.
+
+    Args:
+        n_images: Number of images in the training partition.
+        config: Optional configuration override.
+
+    Returns:
+        A list of length ``n_images``; each element lists the operations to
+        apply to that image, beginning with the identity.
+    """
+    cfg = config or get_config()
+    aug = cfg.augmentation
+
+    plan: List[List[AugmentationOp]] = []
+    if not aug.enabled or aug.variants_per_image == 0:
+        return [[IDENTITY_OP] for _ in range(n_images)]
+
+    rng = np.random.default_rng(cfg.seed)
+    for _ in range(n_images):
+        ops = [IDENTITY_OP]
+        for _ in range(aug.variants_per_image):
+            flip = bool(rng.random() < 0.5) if aug.horizontal_flip else False
+            angle = float(
+                rng.uniform(-aug.rotation_degrees, aug.rotation_degrees)
+            ) if aug.rotation_degrees else 0.0
+            brightness = float(
+                rng.uniform(1.0 - aug.brightness_jitter, 1.0 + aug.brightness_jitter)
+            ) if aug.brightness_jitter else 1.0
+            ops.append(AugmentationOp(flip=flip, angle=angle, brightness=brightness))
+        plan.append(ops)
+    return plan
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: partition
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Partition:
+    """An 80:20 stratified split of a record list.
+
+    Attributes:
+        train: Training records. Only these may be augmented.
+        test: Held-out test records. Never augmented, never used for fitting.
+        train_indices: Positions of the training records in the original list.
+        test_indices: Positions of the test records in the original list.
+    """
+
+    train: List[ImageRecord]
+    test: List[ImageRecord]
+    train_indices: np.ndarray
+    test_indices: np.ndarray
+
+
+def stratified_split(
+    records: Sequence[ImageRecord],
+    config: Optional[Config] = None,
+) -> Partition:
+    """Split records 80:20, stratified by class, with the fixed seed.
+
+    Args:
+        records: The full, deterministically ordered record list.
+        config: Optional configuration override.
+
+    Returns:
+        A :class:`Partition`. The split depends only on the record ordering and
+        the seed, so every technique receives exactly the same partition.
+    """
+    cfg = config or get_config()
+    labels = labels_of(records)
+    indices = np.arange(len(records))
+
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=cfg.partition.test_size,
+        random_state=cfg.seed,
+        shuffle=True,
+        stratify=labels,
+    )
+    train_idx = np.sort(train_idx)
+    test_idx = np.sort(test_idx)
+
+    return Partition(
+        train=[records[i] for i in train_idx],
+        test=[records[i] for i in test_idx],
+        train_indices=train_idx,
+        test_indices=test_idx,
+    )
+
+
+def make_cv(config: Optional[Config] = None) -> StratifiedKFold:
+    """Build the 5-fold stratified cross-validator used on the training set.
+
+    The folds are never applied to the test partition. Reusing one seeded
+    splitter across techniques means fold membership is identical, which is the
+    precondition for the paired t-tests in Phase 4.
+    """
+    cfg = config or get_config()
+    return StratifiedKFold(
+        n_splits=cfg.partition.cv_folds,
+        shuffle=cfg.partition.shuffle,
+        random_state=cfg.seed,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: classifier
+# --------------------------------------------------------------------------- #
+
+def build_pipeline(config: Optional[Config] = None) -> Pipeline:
+    """Build the shared standardise-then-SVM pipeline.
+
+    Wrapping the scaler in a :class:`~sklearn.pipeline.Pipeline` is what keeps
+    standardisation honest: when the pipeline is passed to a cross-validator,
+    the scaler is fitted on each training fold alone and never sees the
+    validation fold or the test partition.
+
+    Returns:
+        An unfitted pipeline of ``StandardScaler`` then ``SVC``.
+    """
+    cfg = config or get_config()
+    clf = cfg.classifier
+    return Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "svc",
+                SVC(
+                    kernel=clf.kernel,
+                    C=clf.C,
+                    gamma=clf.gamma,
+                    probability=clf.probability,
+                    random_state=cfg.seed,
+                ),
+            ),
+        ]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Preparing samples for a feature extractor
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class PreparedSample:
+    """One image carried through preprocessing and segmentation.
+
+    Attributes:
+        record: The source record on disk.
+        image: The preprocessed ``(224, 224, 3)`` BGR image.
+        segmentation: The segmentation result, including the fruit mask.
+        op: The augmentation applied before preprocessing.
+        variant: 0 for the original image, 1..n for augmented variants.
+    """
+
+    record: ImageRecord
+    image: np.ndarray
+    segmentation: SegmentationResult
+    op: AugmentationOp = IDENTITY_OP
+    variant: int = 0
+
+    @property
+    def label(self) -> int:
+        """Ground-truth class label."""
+        return self.record.label
+
+    @property
+    def mask(self) -> np.ndarray:
+        """The fruit mask."""
+        return self.segmentation.mask
+
+    @property
+    def is_augmented(self) -> bool:
+        """True when this sample is an augmented variant, not an original."""
+        return self.variant > 0
+
+
+def prepare_sample(
+    record: ImageRecord,
+    op: AugmentationOp = IDENTITY_OP,
+    variant: int = 0,
+    config: Optional[Config] = None,
+) -> PreparedSample:
+    """Read, optionally augment, preprocess and segment one record."""
+    cfg = config or get_config()
+    raw = read_image(record.path)
+    augmented = apply_augmentation(raw, op) if not op.is_identity else raw
+    image = preprocess(augmented, cfg)
+    segmentation = segment_fruit(image, cfg)
+    return PreparedSample(
+        record=record,
+        image=image,
+        segmentation=segmentation,
+        op=op,
+        variant=variant,
+    )
+
+
+def iter_prepared(
+    records: Sequence[ImageRecord],
+    augment: bool = False,
+    config: Optional[Config] = None,
+) -> Iterator[PreparedSample]:
+    """Yield prepared samples for ``records``, optionally with augmentation.
+
+    Args:
+        records: Records to prepare. For the training partition these are the
+            training records only.
+        augment: When True, apply the deterministic augmentation plan. This
+            must never be True for a test or validation partition.
+        config: Optional configuration override.
+
+    Yields:
+        :class:`PreparedSample` objects, originals before their variants.
+    """
+    cfg = config or get_config()
+    plan = (
+        build_augmentation_plan(len(records), cfg)
+        if augment
+        else [[IDENTITY_OP] for _ in records]
+    )
+    for record, ops in zip(records, plan):
+        for variant, op in enumerate(ops):
+            yield prepare_sample(record, op=op, variant=variant, config=cfg)
+
+
+@dataclass
+class SegmentationFailure:
+    """A logged segmentation failure, written to CSV by the callers."""
+
+    path: Path
+    class_folder: str
+    source: str
+    variant: int
+    coverage: float
+    reason: str
+    substituted: bool
+
+
+def collect_failures(samples: Sequence[PreparedSample]) -> List[SegmentationFailure]:
+    """Extract the segmentation failures from a list of prepared samples."""
+    return [
+        SegmentationFailure(
+            path=sample.record.path,
+            class_folder=sample.record.class_folder,
+            source=sample.record.source,
+            variant=sample.variant,
+            coverage=sample.segmentation.coverage,
+            reason=sample.segmentation.reason,
+            substituted=sample.segmentation.substituted,
+        )
+        for sample in samples
+        if sample.segmentation.failed
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Building a feature matrix from any technique
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class FeatureMatrix:
+    """The output of running one technique over one partition.
+
+    Attributes:
+        X: ``(n_samples, dim)`` feature matrix.
+        y: ``(n_samples,)`` integer labels.
+        technique: Short name of the technique that produced ``X``.
+        extraction_times: Per-image extraction time in seconds, excluding the
+            warm-up call, in the same order as the rows of ``X``.
+        n_augmented: How many rows are augmented variants rather than originals.
+        failures: Segmentation failures encountered while building the matrix.
+        excluded: How many samples were dropped because segmentation failed.
+        paths: Source file path for each row, for tracing individual errors.
+    """
+
+    X: np.ndarray
+    y: np.ndarray
+    technique: str
+    extraction_times: np.ndarray
+    n_augmented: int
+    failures: List[SegmentationFailure]
+    excluded: int
+    paths: List[Path]
+
+    @property
+    def dim(self) -> int:
+        """Feature dimensionality."""
+        return int(self.X.shape[1]) if self.X.size else 0
+
+    @property
+    def mean_extraction_time(self) -> float:
+        """Mean per-image extraction time in seconds, warm-up excluded."""
+        return float(np.mean(self.extraction_times)) if self.extraction_times.size else float("nan")
+
+
+def build_feature_matrix(
+    records: Sequence[ImageRecord],
+    extractor: "FeatureExtractorLike",
+    augment: bool = False,
+    config: Optional[Config] = None,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> FeatureMatrix:
+    """Run one technique over one partition, polymorphically.
+
+    The harness knows nothing about ``extractor`` beyond the fact that it is
+    callable as ``extractor(bgr_image, fruit_mask)``. Copies of the image and
+    mask are handed over, so a technique cannot modify the arrays the harness
+    or another technique will use.
+
+    Timing excludes a warm-up call on the first sample, so one-off import,
+    allocation and library initialisation costs are not charged to the
+    algorithm.
+
+    Args:
+        records: Records to describe.
+        extractor: Any object implementing the shared feature interface.
+        augment: Apply the training-only augmentation plan. Must be False for
+            test and validation partitions.
+        config: Optional configuration override.
+        progress: Optional ``(done, total)`` callback for console reporting.
+
+    Returns:
+        A :class:`FeatureMatrix`.
+    """
+    import time
+
+    cfg = config or get_config()
+    short_name = getattr(extractor, "short_name", extractor.__class__.__name__)
+
+    vectors: List[np.ndarray] = []
+    labels: List[int] = []
+    times: List[float] = []
+    paths: List[Path] = []
+    failures: List[SegmentationFailure] = []
+    excluded = 0
+    n_augmented = 0
+    warmed_up = False
+
+    total = len(records) * (
+        1 + (cfg.augmentation.variants_per_image if augment and cfg.augmentation.enabled else 0)
+    )
+    done = 0
+
+    for sample in iter_prepared(records, augment=augment, config=cfg):
+        done += 1
+        if progress is not None:
+            progress(done, total)
+
+        if sample.segmentation.failed:
+            failures.append(collect_failures([sample])[0])
+            if not sample.segmentation.substituted:
+                excluded += 1
+                continue
+
+        image = sample.image.copy()
+        mask = sample.mask.copy()
+
+        if not warmed_up:
+            extractor(image, mask)  # Warm-up: result discarded, time not counted.
+            warmed_up = True
+
+        start = time.perf_counter()
+        vector = extractor(image, mask)
+        times.append(time.perf_counter() - start)
+
+        vectors.append(vector)
+        labels.append(sample.label)
+        paths.append(sample.record.path)
+        if sample.is_augmented:
+            n_augmented += 1
+
+    matrix = (
+        np.vstack(vectors)
+        if vectors
+        else np.empty((0, getattr(extractor, "dim", 0)), dtype=np.float64)
+    )
+
+    return FeatureMatrix(
+        X=matrix,
+        y=np.asarray(labels, dtype=np.int64),
+        technique=short_name,
+        extraction_times=np.asarray(times, dtype=np.float64),
+        n_augmented=n_augmented,
+        failures=failures,
+        excluded=excluded,
+        paths=paths,
+    )

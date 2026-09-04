@@ -1,0 +1,23 @@
+# Datasets are large and licensed separately: never committed.
+data/primary/**
+data/generalisation/**
+data/robustness/**
+!data/**/.gitkeep
+
+# Generated results
+results/**
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

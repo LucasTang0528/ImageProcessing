@@ -1,0 +1,95 @@
+{
+  "_comment": "FreshSight single source of truth. Every path is relative to the project root unless it is already absolute. Editing this file is the ONLY supported way to change experimental parameters.",
+
+  "seed": 42,
+
+  "paths": {
+    "project_root": ".",
+    "primary_root": "data/primary",
+    "generalisation_root": "data/generalisation",
+    "robustness_root": "data/robustness",
+    "results_root": "results",
+    "cache_root": "results/cache"
+  },
+
+  "datasets": {
+    "primary": {
+      "classes": ["UnripeApple", "RipeApple", "RottenApple"],
+      "display_names": ["Unripe", "Ripe", "Rotten"]
+    },
+    "generalisation": {
+      "classes": ["FreshApple", "RottenApple"],
+      "display_names": ["Fresh", "Rotten"]
+    },
+    "robustness": {
+      "classes": ["Good", "Bad", "Mixed"],
+      "display_names": ["Good", "Bad", "Mixed"]
+    },
+    "image_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"]
+  },
+
+  "preprocess": {
+    "resize": [224, 224],
+    "gaussian_kernel": [5, 5],
+    "gaussian_sigma": 0,
+    "clahe_clip_limit": 2.0,
+    "clahe_tile_grid": [8, 8]
+  },
+
+  "segmentation": {
+    "close_kernel": [5, 5],
+    "min_mask_fraction": 0.05,
+    "max_mask_fraction": 0.95,
+    "polarity": "auto",
+    "on_failure": "exclude",
+    "fill_holes": true
+  },
+
+  "partition": {
+    "test_size": 0.2,
+    "cv_folds": 5,
+    "shuffle": true
+  },
+
+  "augmentation": {
+    "enabled": true,
+    "variants_per_image": 3,
+    "horizontal_flip": true,
+    "rotation_degrees": 15.0,
+    "brightness_jitter": 0.2
+  },
+
+  "classifier": {
+    "kernel": "rbf",
+    "C": 1.0,
+    "gamma": "scale",
+    "probability": true
+  },
+
+  "t1_colour": {
+    "colour_space": "HSV",
+    "bins": 32,
+    "s_min": 40,
+    "v_max": 240
+  },
+
+  "t2_glcm": {
+    "levels": 32,
+    "distances": [1, 2],
+    "angles_deg": [0, 45, 90, 135],
+    "angle_averaged": false
+  },
+
+  "t3_lbp_blemish": {
+    "lbp_configs": [[8, 1], [16, 2]],
+    "hue_deviation": 20.0,
+    "saturation_deviation": 60.0,
+    "value_deviation": 60.0,
+    "open_kernel": [3, 3],
+    "min_blemish_area": 10
+  },
+
+  "sanity_check": {
+    "images_per_class": 12
+  }
+}
