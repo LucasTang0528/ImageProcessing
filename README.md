@@ -160,8 +160,9 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                       # 48 harness tests, no dataset required
+python -m pytest tests -v                       # 64 tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
+python scripts/audit_dataset.py                 # dataset confound audit, dataset required
 ```
 
 The sanity check writes to `results/phase1/`:
@@ -182,6 +183,51 @@ python scripts/sanity_check_segmentation.py --source generalisation
 **Inspect the PNGs before proceeding to Phase 2.** If the masks are wrong, every
 number in every later phase is wrong, and no amount of downstream analysis will
 reveal it.
+
+### 4. Audit the dataset before adopting it
+
+A comparative study inherits every flaw in its data. The audit measures the
+flaws that accuracy figures cannot reveal, and prints a pass/fail verdict:
+
+```bash
+python scripts/audit_dataset.py                                          # data/primary
+python scripts/audit_dataset.py --source generalisation
+python scripts/audit_dataset.py --root data/candidate --classes A,B,C    # vet a candidate
+```
+
+| Check | What it answers |
+| :-- | :-- |
+| Background-only classification | Train the shared SVM on the border ring alone, which holds no fruit pixels. Near chance is healthy; well above chance means imaging style is confounded with the label. |
+| Segmentation behaviour per class | Coverage, chosen polarity and failure rate describe the segmenter, not the fruit, so they should barely move between classes. Drift means any exclusion policy removes images class-dependently. |
+| Background uniformity per class | Separates plain studio backdrops from cluttered scenes, and explains a failure of the first check. |
+| Duplicates and near-duplicates | A duplicate spanning the train/test split leaks the answer; one spanning two classes means the labels contradict each other. |
+
+Duplicate detection runs a difference hash as a cheap filter and then confirms
+each candidate against a colour thumbnail. The confirmation is not optional: a
+difference hash keys on the silhouette, so every centred apple on a white
+backdrop hashes alike, and matching on the hash alone reported 465 fictitious
+cross-class duplicates on the primary set. With confirmation the true figure is
+45 pairs, none crossing a class boundary. See `test_dataset_audit.py`.
+
+Exit status is 0 when the dataset passes and 2 when it does not, so the audit
+can gate a pipeline.
+
+#### Result for the current primary dataset
+
+The Fruit Ripeness Dataset (Nurdiyansah, 2024) **fails** this audit:
+
+| Finding | Measurement |
+| :-- | :-- |
+| Imaging style predicts the label | Background pixels alone classify at **74.0%** against a 33.3% chance level; Unripe recall 92.5% |
+| Segmentation behaves differently per class | Failure rate 0.0% Unripe, 11.0% Ripe, 12.5% Rotten; "dark" polarity chosen for 13.4%, 45.3%, 76.1% |
+| Class-dependent exclusion | `on_failure: "exclude"` would drop 0 Unripe but 100 Rotten images, silently rebalancing the test set |
+| Duplicates | 45 within-class pairs, none cross-class |
+
+The cause is that the set was scraped: unripe apples are photographed on the
+tree, rotten apples as studio product shots. Only 138 of its 2400 images have a
+plain background and 128 of those are Rotten, so restricting to studio shots is
+not available either — it would leave no Unripe images at all. A different
+primary dataset is required; the harness itself is unaffected.
 
 ### Phases 2–6
 
@@ -304,6 +350,9 @@ are introduced for Otsu to mistake for fruit.
 | Timing the first call, charging import overhead to the algorithm | A discarded warm-up call precedes timing, then times are averaged | `test_extraction_timing_excludes_the_warm_up_call` |
 | Accuracy reported alone on an imbalanced test set | `classification_metrics` always returns macro and weighted F1 | — |
 | An implicit difference between techniques | Techniques receive copies and hold no harness reference | `test_a_technique_cannot_corrupt_the_shared_sample`, `test_two_techniques_receive_identical_inputs` |
+| Scoring the photography rather than the fruit | `audit_dataset.py` trains the shared classifier on background pixels alone and fails the dataset if it beats chance | `test_verdict_fails_a_dataset_whose_background_predicts_the_class` |
+| A segmenter that behaves differently on different classes | The audit compares coverage, polarity and failure rate across classes | `test_verdict_fails_class_dependent_segmentation` |
+| Duplicate images leaking across the split, or carrying two labels | Difference hash filter confirmed by a colour thumbnail | `test_same_silhouette_different_colour_is_not_a_duplicate`, `test_verdict_fails_on_contradictory_labels` |
 
 ---
 
@@ -325,8 +374,10 @@ compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
 scripts/
   fetch_dataset.py               downloads and stages the primary dataset
   sanity_check_segmentation.py   visual verification of the harness
+  audit_dataset.py               confound audit; vets a dataset before adoption
 tests/
   test_phase1_harness.py         48 tests, runnable without the dataset
+  test_dataset_audit.py          16 tests for the audit and its duplicate detector
 results/         all generated CSVs and PNGs
 ```
 

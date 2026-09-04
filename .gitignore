@@ -4,6 +4,14 @@ data/generalisation/**
 data/robustness/**
 !data/**/.gitkeep
 
+# Downloaded dataset archives, staged before extraction. The extracted folders
+# above are ignored, but the archive itself sits beside them and is not, so it
+# would otherwise be committed by a plain "git add data".
+data/*.zip
+data/*.tar
+data/*.tar.gz
+data/*.tgz
+
 # Generated results
 results/**
 !results/.gitkeep
