@@ -41,6 +41,7 @@ from features.base import (  # noqa: E402
     require_non_empty_mask,
     validate_vector,
 )
+from evaluate import cross_validate_technique  # noqa: E402
 from harness import (  # noqa: E402
     IDENTITY_OP,
     AugmentationOp,
@@ -48,6 +49,7 @@ from harness import (  # noqa: E402
     build_augmentation_plan,
     build_feature_matrix,
     build_pipeline,
+    leakage_safe_folds,
     make_cv,
     prepare_sample,
     preprocess,
@@ -108,6 +110,19 @@ class ConstantExtractor(FeatureExtractor):
             ],
             dtype=np.float64,
         )
+
+
+class AlternativeExtractor(FeatureExtractor):
+    """A second, differently shaped extractor, to prove folds are descriptor-blind."""
+
+    name = "alternative test descriptor"
+    short_name = "TEST2"
+    dim = 2
+
+    def extract_features(self, bgr_image: np.ndarray, fruit_mask: np.ndarray) -> np.ndarray:
+        selected = require_non_empty_mask(fruit_mask, self.short_name)
+        pixels = bgr_image[selected].astype(np.float64)
+        return np.array([pixels.max(), pixels.min()], dtype=np.float64)
 
 
 class MutatingExtractor(FeatureExtractor):
@@ -538,6 +553,128 @@ def test_a_technique_cannot_corrupt_the_shared_sample(tmp_path):
     fresh = prepare_sample(records[0], config=CONFIG)
     assert np.array_equal(fresh.image, image_before)
     assert np.array_equal(fresh.mask, mask_before)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-validation leakage: augmented variants must not cross a fold boundary
+# --------------------------------------------------------------------------- #
+
+def augmented_training_matrix(tmp_path, per_class: int = 10):
+    """Build an augmented training matrix from a small synthetic dataset."""
+    write_synthetic_dataset(tmp_path / "primary", list(CONFIG.primary.classes), per_class=per_class)
+    records = load_dataset(tmp_path / "primary", CONFIG.primary, "primary", CONFIG.image_extensions)
+    partition = stratified_split(records, CONFIG)
+    return build_feature_matrix(partition.train, ConstantExtractor(), augment=True, config=CONFIG)
+
+
+def test_feature_matrix_records_group_and_variant_provenance(tmp_path):
+    """Each row must know which source image it came from."""
+    matrix = augmented_training_matrix(tmp_path)
+    assert matrix.groups.shape == (matrix.X.shape[0],)
+    assert matrix.variants.shape == (matrix.X.shape[0],)
+    # Every source image contributes one original plus its configured variants.
+    expected = 1 + CONFIG.augmentation.variants_per_image
+    for group in np.unique(matrix.groups):
+        rows = matrix.groups == group
+        assert int(rows.sum()) == expected
+        assert int((matrix.variants[rows] == 0).sum()) == 1, "exactly one original per image"
+
+
+def test_no_augmented_variant_of_a_validation_image_reaches_a_training_fold(tmp_path):
+    """The guarantee this whole design exists to provide.
+
+    For every fold, no row on the training side - original or augmented - may
+    come from a source image that appears on the validation side.
+    """
+    matrix = augmented_training_matrix(tmp_path)
+
+    for fold, (train_rows, validation_rows) in enumerate(leakage_safe_folds(matrix, CONFIG)):
+        train_images = set(matrix.groups[train_rows].tolist())
+        validation_images = set(matrix.groups[validation_rows].tolist())
+
+        shared = train_images & validation_images
+        assert not shared, (
+            f"fold {fold}: source image(s) {sorted(shared)} appear on both sides of the "
+            f"split, so an augmented variant of a held-out image leaked into training"
+        )
+
+
+def test_validation_folds_contain_only_original_images(tmp_path):
+    """Scoring on augmented data would not describe real-world performance."""
+    matrix = augmented_training_matrix(tmp_path)
+    for fold, (_, validation_rows) in enumerate(leakage_safe_folds(matrix, CONFIG)):
+        variants = matrix.variants[validation_rows]
+        assert np.all(variants == 0), (
+            f"fold {fold}: {int((variants != 0).sum())} validation rows are augmented variants"
+        )
+
+
+def test_training_folds_do_keep_the_augmented_variants(tmp_path):
+    """Augmentation must still reach training, or it would be pointless."""
+    matrix = augmented_training_matrix(tmp_path)
+    for train_rows, _ in leakage_safe_folds(matrix, CONFIG):
+        assert int((matrix.variants[train_rows] != 0).sum()) > 0
+
+
+def test_every_original_is_validated_exactly_once(tmp_path):
+    """The five folds must partition the originals, with nothing lost or reused."""
+    matrix = augmented_training_matrix(tmp_path)
+    validated: List[int] = []
+    for _, validation_rows in leakage_safe_folds(matrix, CONFIG):
+        validated.extend(matrix.groups[validation_rows].tolist())
+    assert sorted(validated) == sorted(np.unique(matrix.groups).tolist())
+
+
+def test_cross_validation_folds_are_identical_across_techniques(tmp_path):
+    """Fold membership must not depend on the descriptor, or the t-tests are void."""
+    write_synthetic_dataset(tmp_path / "primary", list(CONFIG.primary.classes), per_class=10)
+    records = load_dataset(tmp_path / "primary", CONFIG.primary, "primary", CONFIG.image_extensions)
+    partition = stratified_split(records, CONFIG)
+
+    first = build_feature_matrix(partition.train, ConstantExtractor(), augment=True, config=CONFIG)
+    second = build_feature_matrix(partition.train, AlternativeExtractor(), augment=True, config=CONFIG)
+
+    for (train_a, val_a), (train_b, val_b) in zip(
+        leakage_safe_folds(first, CONFIG), leakage_safe_folds(second, CONFIG)
+    ):
+        assert np.array_equal(train_a, train_b)
+        assert np.array_equal(val_a, val_b)
+
+
+def test_naive_row_wise_cross_validation_leaks(tmp_path):
+    """Negative control: prove the obvious approach really is broken.
+
+    Splitting the augmented matrix row-wise - what ``cross_validate(pipeline,
+    X, y, cv=make_cv())`` would do - scatters near-duplicate variants of one
+    image across both sides of every fold. This test asserts that leak exists,
+    so that if someone ever "simplifies" the cross-validator back to a plain
+    row-wise split, the leakage-safe tests above stop being a formality.
+    """
+    matrix = augmented_training_matrix(tmp_path)
+
+    naive_leaks = 0
+    for train_rows, validation_rows in make_cv(CONFIG).split(matrix.X, matrix.y):
+        naive_leaks += len(
+            set(matrix.groups[train_rows].tolist()) & set(matrix.groups[validation_rows].tolist())
+        )
+    assert naive_leaks > 0, "expected the naive row-wise split to leak"
+
+    safe_leaks = sum(
+        len(set(matrix.groups[train].tolist()) & set(matrix.groups[val].tolist()))
+        for train, val in leakage_safe_folds(matrix, CONFIG)
+    )
+    assert safe_leaks == 0
+    assert naive_leaks > safe_leaks
+
+
+def test_cross_validate_technique_uses_the_safe_folds(tmp_path):
+    """The public entry point must produce one score per fold, leak-free."""
+    matrix = augmented_training_matrix(tmp_path)
+    report = cross_validate_technique(build_pipeline(CONFIG), matrix, config=CONFIG)
+    assert report.accuracy_folds.size == CONFIG.partition.cv_folds
+    assert report.macro_f1_folds.size == CONFIG.partition.cv_folds
+    assert np.all((report.accuracy_folds >= 0.0) & (report.accuracy_folds <= 1.0))
+    assert report.technique == "TEST"
 
 
 def test_two_techniques_receive_identical_inputs(tmp_path):

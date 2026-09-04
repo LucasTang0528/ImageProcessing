@@ -26,11 +26,10 @@ from sklearn.metrics import (
     f1_score,
     precision_recall_fscore_support,
 )
-from sklearn.model_selection import cross_validate
 from sklearn.pipeline import Pipeline
 
 from config import Config, get_config
-from harness import make_cv
+from harness import FeatureMatrix, leakage_safe_folds
 
 
 # --------------------------------------------------------------------------- #
@@ -175,44 +174,64 @@ class CrossValidationReport:
 
 def cross_validate_technique(
     pipeline: Pipeline,
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    technique: str = "technique",
+    matrix: FeatureMatrix,
+    technique: Optional[str] = None,
     config: Optional[Config] = None,
 ) -> CrossValidationReport:
     """Run 5-fold stratified cross-validation on the training partition.
 
-    The pipeline is cloned before fitting, and the scaler inside it is fitted
-    on each training fold alone, so no validation fold influences
-    standardisation. The fold splitter is the shared seeded one from the
-    harness, which is what makes the Phase 4 paired t-tests legitimate: every
-    technique is scored on exactly the same five folds.
+    This deliberately takes a whole :class:`~harness.FeatureMatrix` rather than
+    a bare ``X``/``y`` pair. Splitting a raw augmented matrix row-wise would
+    scatter near-duplicate variants of the same image across both sides of
+    every fold, so the folds must be drawn from the matrix's group and variant
+    provenance. Requiring the full object makes that misuse impossible to
+    express: there is no argument through which a caller can hand over an
+    augmented matrix stripped of the information needed to split it safely.
+
+    Guarantees, all enforced by :func:`~harness.leakage_safe_folds`:
+
+    * folds are drawn over **source images**, so an image and every one of its
+      augmented variants stay on the same side of the split;
+    * training folds carry originals and their variants;
+    * validation folds carry **originals only**, so the reported score
+      describes performance on real images.
+
+    The pipeline is cloned per fold and the scaler inside it is fitted on the
+    training fold alone, so no validation row influences standardisation.
 
     Args:
         pipeline: An unfitted scaler-then-SVM pipeline.
-        X_train: Training feature matrix. Must not contain test rows.
-        y_train: Training labels.
-        technique: Short name, recorded in the report.
+        matrix: The **training** feature matrix. Must not contain test rows.
+        technique: Short name. Defaults to the matrix's own technique name.
         config: Optional configuration override.
 
     Returns:
         A :class:`CrossValidationReport` with one score per fold.
     """
     cfg = config or get_config()
-    outcome = cross_validate(
-        clone(pipeline),
-        X_train,
-        y_train,
-        cv=make_cv(cfg),
-        scoring={"accuracy": "accuracy", "macro_f1": "f1_macro"},
-        return_train_score=False,
-        n_jobs=None,
-    )
+    name = technique or matrix.technique
+
+    accuracies: List[float] = []
+    macro_f1s: List[float] = []
+    fit_times: List[float] = []
+
+    for train_rows, validation_rows in leakage_safe_folds(matrix, cfg):
+        estimator = clone(pipeline)
+
+        start = time.perf_counter()
+        estimator.fit(matrix.X[train_rows], matrix.y[train_rows])
+        fit_times.append(time.perf_counter() - start)
+
+        predicted = estimator.predict(matrix.X[validation_rows])
+        truth = matrix.y[validation_rows]
+        accuracies.append(float(accuracy_score(truth, predicted)))
+        macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+
     return CrossValidationReport(
-        technique=technique,
-        accuracy_folds=np.asarray(outcome["test_accuracy"], dtype=np.float64),
-        macro_f1_folds=np.asarray(outcome["test_macro_f1"], dtype=np.float64),
-        fit_seconds=np.asarray(outcome["fit_time"], dtype=np.float64),
+        technique=name,
+        accuracy_folds=np.asarray(accuracies, dtype=np.float64),
+        macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
+        fit_seconds=np.asarray(fit_times, dtype=np.float64),
     )
 
 

@@ -95,7 +95,7 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                       # 40 harness tests, no dataset required
+python -m pytest tests -v                       # 48 harness tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
 ```
 
@@ -168,7 +168,11 @@ read -> (augment, training only) -> preprocess -> segment -> extract features
 **Partition** ([`harness.stratified_split`](harness.py), [`harness.make_cv`](harness.py))
 
 10. 80:20 stratified train/test split, `random_state=42`.
-11. 5-fold stratified cross-validation on the **training partition only**.
+11. 5-fold stratified cross-validation on the **training partition only**,
+    with folds drawn over **source images** rather than over feature rows
+    (`harness.leakage_safe_folds`). An image and all of its augmented variants
+    always land on the same side of a fold; training folds carry originals and
+    variants, validation folds carry **originals only**.
 12. Augmentation — horizontal flip, ±15° rotation, brightness jitter ±0.2 —
     applied to **training images only**, and only *after* the split.
 
@@ -229,6 +233,7 @@ are introduced for Otsu to mistake for fruit.
 | :-- | :-- | :-- |
 | Scaler or hyperparameter fitted on test data | Scaler is a pipeline step; CV runs on the training partition only | `test_pipeline_scales_inside_the_pipeline` |
 | Augmenting before splitting, leaking a flipped test image into training | Augmentation plan is built from the training partition after the split; `augment=False` for test | `test_feature_matrix_augments_training_only`, `test_no_test_image_appears_in_the_training_matrix` |
+| A flipped copy of a **validation** image sitting in its own training fold | CV folds are drawn over source images, not rows; validation folds hold originals only | `test_no_augmented_variant_of_a_validation_image_reaches_a_training_fold`, `test_validation_folds_contain_only_original_images`, `test_naive_row_wise_cross_validation_leaks` |
 | An empty mask producing a vector of zeros or NaNs | Coverage bounds flag the image; `require_non_empty_mask` raises | `test_empty_mask_is_refused_rather_than_producing_zeros` |
 | NaN or Inf reaching the classifier | `validate_vector` checks every returned vector | `test_validate_vector_rejects_nan_and_inf` |
 | Timing the first call, charging import overhead to the algorithm | A discarded warm-up call precedes timing, then times are averaged | `test_extraction_timing_excludes_the_warm_up_call` |
@@ -255,7 +260,7 @@ compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
 scripts/
   sanity_check_segmentation.py   visual verification of the harness
 tests/
-  test_phase1_harness.py         40 tests, runnable without the dataset
+  test_phase1_harness.py         48 tests, runnable without the dataset
 results/         all generated CSVs and PNGs
 ```
 

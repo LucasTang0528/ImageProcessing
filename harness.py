@@ -570,6 +570,10 @@ class PreparedSample:
         segmentation: The segmentation result, including the fruit mask.
         op: The augmentation applied before preprocessing.
         variant: 0 for the original image, 1..n for augmented variants.
+        record_index: Position of the source record in the list this sample was
+            prepared from. Every variant of one image shares this value, which
+            is what lets the cross-validator keep an image and its variants on
+            the same side of a fold.
     """
 
     record: ImageRecord
@@ -577,6 +581,7 @@ class PreparedSample:
     segmentation: SegmentationResult
     op: AugmentationOp = IDENTITY_OP
     variant: int = 0
+    record_index: int = 0
 
     @property
     def label(self) -> int:
@@ -599,6 +604,7 @@ def prepare_sample(
     op: AugmentationOp = IDENTITY_OP,
     variant: int = 0,
     config: Optional[Config] = None,
+    record_index: int = 0,
 ) -> PreparedSample:
     """Read, optionally augment, preprocess and segment one record."""
     cfg = config or get_config()
@@ -612,6 +618,7 @@ def prepare_sample(
         segmentation=segmentation,
         op=op,
         variant=variant,
+        record_index=record_index,
     )
 
 
@@ -638,9 +645,15 @@ def iter_prepared(
         if augment
         else [[IDENTITY_OP] for _ in records]
     )
-    for record, ops in zip(records, plan):
+    for record_index, (record, ops) in enumerate(zip(records, plan)):
         for variant, op in enumerate(ops):
-            yield prepare_sample(record, op=op, variant=variant, config=cfg)
+            yield prepare_sample(
+                record,
+                op=op,
+                variant=variant,
+                config=cfg,
+                record_index=record_index,
+            )
 
 
 @dataclass
@@ -691,6 +704,11 @@ class FeatureMatrix:
         failures: Segmentation failures encountered while building the matrix.
         excluded: How many samples were dropped because segmentation failed.
         paths: Source file path for each row, for tracing individual errors.
+        groups: ``(n_samples,)`` source-image index per row. An original and
+            all of its augmented variants share one group, which is what
+            :func:`leakage_safe_folds` uses to keep them on the same side of a
+            cross-validation fold.
+        variants: ``(n_samples,)`` variant index per row; 0 marks an original.
     """
 
     X: np.ndarray
@@ -701,6 +719,13 @@ class FeatureMatrix:
     failures: List[SegmentationFailure]
     excluded: int
     paths: List[Path]
+    groups: np.ndarray
+    variants: np.ndarray
+
+    @property
+    def originals(self) -> np.ndarray:
+        """Row indices of the original, non-augmented samples."""
+        return np.flatnonzero(self.variants == 0)
 
     @property
     def dim(self) -> int:
@@ -751,6 +776,8 @@ def build_feature_matrix(
     labels: List[int] = []
     times: List[float] = []
     paths: List[Path] = []
+    groups: List[int] = []
+    variants: List[int] = []
     failures: List[SegmentationFailure] = []
     excluded = 0
     n_augmented = 0
@@ -786,6 +813,8 @@ def build_feature_matrix(
         vectors.append(vector)
         labels.append(sample.label)
         paths.append(sample.record.path)
+        groups.append(sample.record_index)
+        variants.append(sample.variant)
         if sample.is_augmented:
             n_augmented += 1
 
@@ -804,4 +833,83 @@ def build_feature_matrix(
         failures=failures,
         excluded=excluded,
         paths=paths,
+        groups=np.asarray(groups, dtype=np.int64),
+        variants=np.asarray(variants, dtype=np.int64),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Leakage-safe cross-validation folds
+# --------------------------------------------------------------------------- #
+
+def leakage_safe_folds(
+    matrix: FeatureMatrix,
+    config: Optional[Config] = None,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Build 5 stratified folds that cannot leak an augmented variant.
+
+    Splitting the augmented feature matrix directly would be a serious error.
+    Augmenting an image produces several rows that are near-duplicates of one
+    another, so a plain row-wise split puts a flipped copy of a validation
+    image into the training fold and the model is scored on data it has
+    effectively already seen. Validation accuracy then measures memorisation
+    rather than generalisation, and inflates every technique's score.
+
+    This function instead:
+
+    1. draws the stratified folds over **source images**, not over rows, so an
+       image and all of its variants always land on the same side;
+    2. puts originals *and* their augmented variants into the training side;
+    3. puts **only originals** into the validation side, because a score
+       measured on augmented data would not describe real-world performance.
+
+    Fold membership depends only on the record ordering and the seed, so it is
+    identical for all three techniques. That is the precondition for the Phase
+    4 paired t-tests.
+
+    Args:
+        matrix: A training feature matrix built with ``augment=True``.
+        config: Optional configuration override.
+
+    Returns:
+        A list of ``(train_rows, validation_rows)`` index arrays, one pair per
+        fold.
+
+    Raises:
+        ValueError: If the matrix is empty, or if a fold has no validation
+            rows because no original survived segmentation.
+    """
+    cfg = config or get_config()
+    if matrix.y.size == 0:
+        raise ValueError("Cannot cross-validate an empty feature matrix")
+
+    unique_groups = np.unique(matrix.groups)
+    # Every row of a group shares one label, so the first occurrence suffices.
+    group_labels = np.asarray(
+        [matrix.y[np.flatnonzero(matrix.groups == group)[0]] for group in unique_groups],
+        dtype=np.int64,
+    )
+
+    is_original = matrix.variants == 0
+    folds: List[Tuple[np.ndarray, np.ndarray]] = []
+
+    splitter = make_cv(cfg)
+    placeholder = np.zeros((unique_groups.size, 1))
+    for train_positions, validation_positions in splitter.split(placeholder, group_labels):
+        train_groups = unique_groups[train_positions]
+        validation_groups = unique_groups[validation_positions]
+
+        in_train = np.isin(matrix.groups, train_groups)
+        in_validation = np.isin(matrix.groups, validation_groups)
+
+        train_rows = np.flatnonzero(in_train)
+        validation_rows = np.flatnonzero(in_validation & is_original)
+
+        if validation_rows.size == 0:
+            raise ValueError(
+                "A cross-validation fold has no validation rows: every original "
+                "image in the fold failed segmentation."
+            )
+        folds.append((train_rows, validation_rows))
+
+    return folds
