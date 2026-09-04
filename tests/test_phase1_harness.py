@@ -64,16 +64,46 @@ CONFIG = get_config()
 # Synthetic fixtures
 # --------------------------------------------------------------------------- #
 
+#: Amplitude of the grain added to every synthetic fixture, in grey levels.
+#:
+#: A perfectly flat image is not a meaningful input to any segmenter that fits
+#: a colour model. GrabCut estimates Gaussian mixtures for foreground and
+#: background, and on a zero-variance image those mixtures are degenerate, so
+#: the smoothness term dominates and the result stays near whatever region was
+#: seeded. Measured on these fixtures, a flat disc segments to 0.417 coverage
+#: against a true 0.235, while the same disc carrying +/-3 grey levels of
+#: grain segments to 0.247 and becomes independent of the background
+#: (intersection over union 0.996 between a light and a dark ground).
+#:
+#: No photograph is ever flat: sensor noise alone exceeds this. The grain
+#: makes the fixtures representative rather than making the test lenient.
+TEXTURE_AMPLITUDE = 3
+
+
+def add_texture(
+    image: np.ndarray,
+    amplitude: int = TEXTURE_AMPLITUDE,
+    seed: int = 0,
+) -> np.ndarray:
+    """Add reproducible fine grain to a synthetic image."""
+    if amplitude <= 0:
+        return image
+    rng = np.random.default_rng(seed)
+    grain = rng.integers(-amplitude, amplitude + 1, size=image.shape, dtype=np.int16)
+    return np.clip(image.astype(np.int16) + grain, 0, 255).astype(np.uint8)
+
+
 def synthetic_apple(
     background: int = 30,
     fruit: tuple = (40, 40, 200),
     radius: int = 70,
     size: int = 256,
+    texture: int = TEXTURE_AMPLITUDE,
 ) -> np.ndarray:
     """Build a synthetic BGR image of a coloured disc on a flat background."""
     image = np.full((size, size, 3), background, dtype=np.uint8)
     cv2.circle(image, (size // 2, size // 2), radius, fruit, thickness=-1)
-    return image
+    return add_texture(image, texture)
 
 
 def write_synthetic_dataset(root: Path, classes: List[str], per_class: int = 12) -> None:
@@ -244,22 +274,41 @@ def test_preprocess_rejects_a_greyscale_input():
 # Segmentation
 # --------------------------------------------------------------------------- #
 
-def test_segmentation_finds_a_bright_fruit_on_a_dark_background():
-    image = preprocess(synthetic_apple(background=25, fruit=(60, 60, 220)), CONFIG)
-    result = segment_fruit(image, CONFIG)
+#: The configuration with the brief's Otsu method forced on.
+#:
+#: ``segmentation.method`` defaults to GrabCut, because Otsu on the value
+#: channel does not separate fruit from background on this dataset. The Otsu
+#: path is still shipped and still reported in the write-up, so it keeps its
+#: own tests; those that concern threshold polarity are meaningless under
+#: GrabCut and are pinned to this configuration.
+OTSU_CONFIG = replace(CONFIG, segmentation=replace(CONFIG.segmentation, method="otsu_v"))
+
+#: True coverage of the default synthetic disc once resized to 224 x 224.
+DISC_COVERAGE = np.pi * (70 * 224 / 256) ** 2 / 224 ** 2
+
+
+@pytest.mark.parametrize("config", [CONFIG, OTSU_CONFIG], ids=["grabcut", "otsu_v"])
+def test_segmentation_finds_a_bright_fruit_on_a_dark_background(config):
+    image = preprocess(synthetic_apple(background=25, fruit=(60, 60, 220)), config)
+    result = segment_fruit(image, config)
     assert not result.failed, result.reason
-    assert 0.10 < result.coverage < 0.35
+    assert result.coverage == pytest.approx(DISC_COVERAGE, abs=0.03)
     assert result.contour.size > 0
     x, y, w, h = result.bbox
     assert w > 0 and h > 0
 
 
-def test_segmentation_finds_a_dark_fruit_on_a_bright_background():
-    """The automatic polarity choice must handle an inverted contrast."""
-    image = preprocess(synthetic_apple(background=235, fruit=(50, 40, 60)), CONFIG)
-    result = segment_fruit(image, CONFIG)
+@pytest.mark.parametrize("config", [CONFIG, OTSU_CONFIG], ids=["grabcut", "otsu_v"])
+def test_segmentation_finds_a_dark_fruit_on_a_bright_background(config):
+    """An inverted contrast must not invert the mask.
+
+    For Otsu this exercises the automatic polarity choice; for GrabCut it
+    checks that the border seed identifies the light ground as background.
+    """
+    image = preprocess(synthetic_apple(background=235, fruit=(50, 40, 60)), config)
+    result = segment_fruit(image, config)
     assert not result.failed, result.reason
-    assert 0.10 < result.coverage < 0.35
+    assert result.coverage == pytest.approx(DISC_COVERAGE, abs=0.03)
     # The mask must sit on the fruit, not on the background: the centre of the
     # frame is fruit and the corners are background.
     assert result.mask[112, 112] == 255
@@ -274,21 +323,25 @@ def test_segmentation_keeps_only_the_largest_component():
     assert count == 2  # Background plus exactly one retained component.
 
 
-def test_segmentation_flags_a_mask_that_is_too_small():
-    image = preprocess(synthetic_apple(background=25, fruit=(60, 60, 220), radius=8), CONFIG)
-    result = segment_fruit(image, CONFIG)
+def test_otsu_flags_a_mask_that_is_too_small():
+    image = preprocess(
+        synthetic_apple(background=25, fruit=(60, 60, 220), radius=8), OTSU_CONFIG
+    )
+    result = segment_fruit(image, OTSU_CONFIG)
     assert result.failed
     assert "below the permitted" in result.reason
 
 
-def test_segmentation_flags_a_mask_that_is_too_large():
+def test_otsu_flags_a_mask_that_is_too_large():
     """Under a forced polarity, an almost-full-frame mask must be rejected.
 
     The two Otsu sides are complements, so with ``polarity="auto"`` the
     over-coverage branch is normally avoided by choosing the other side. The
     guard still has to hold when a fixed polarity is configured.
     """
-    forced = replace(CONFIG, segmentation=replace(CONFIG.segmentation, polarity="bright"))
+    forced = replace(
+        OTSU_CONFIG, segmentation=replace(OTSU_CONFIG.segmentation, polarity="bright")
+    )
     image = np.full((256, 256, 3), 40, dtype=np.uint8)
     cv2.circle(image, (128, 128), 250, (230, 230, 230), thickness=-1)
     result = segment_fruit(preprocess(image, forced), forced)
@@ -297,14 +350,54 @@ def test_segmentation_flags_a_mask_that_is_too_large():
     assert "above the permitted" in result.reason
 
 
-def test_automatic_polarity_never_returns_an_empty_mask_over_a_full_one():
+def test_otsu_automatic_polarity_never_returns_an_empty_mask_over_a_full_one():
     """A degenerate uniform frame must not be silently reported as 'fine'."""
-    image = preprocess(np.full((256, 256, 3), 200, dtype=np.uint8), CONFIG)
-    result = segment_fruit(image, CONFIG)
+    image = preprocess(np.full((256, 256, 3), 200, dtype=np.uint8), OTSU_CONFIG)
+    result = segment_fruit(image, OTSU_CONFIG)
     assert result.failed, "a uniform frame contains no fruit and must be flagged"
 
 
-def blemished_apple(background: int, size: int = 256) -> np.ndarray:
+def test_grabcut_flags_a_frame_that_holds_no_fruit():
+    """The GrabCut counterpart of the minimum-coverage guard.
+
+    GrabCut is seeded with a definite-foreground core, so it can never return
+    an empty mask and an image holding no fruit still yields a mask the size
+    of that core. The degeneracy check exists because coverage alone cannot
+    detect this, and a plain ellipse of background would otherwise be handed
+    to the feature extractors as a fruit.
+    """
+    image = preprocess(add_texture(np.full((256, 256, 3), 200, dtype=np.uint8)), CONFIG)
+    result = segment_fruit(image, CONFIG)
+    assert result.failed, "a uniform frame contains no fruit and must be flagged"
+    assert "seeded foreground core" in result.reason
+
+
+def test_grabcut_flags_a_fruit_smaller_than_its_seed():
+    """A fruit smaller than the seeded core cannot be segmented from it."""
+    image = preprocess(
+        synthetic_apple(background=25, fruit=(60, 60, 220), radius=8), CONFIG
+    )
+    result = segment_fruit(image, CONFIG)
+    assert result.failed
+
+
+def test_grabcut_is_reproducible_across_calls():
+    """GrabCut fits its colour models with k-means, which draws on a global RNG.
+
+    Left unseeded it returns a slightly different mask every call, so two
+    techniques handed the same image would be described from different masks -
+    the one difference between techniques this study exists to exclude.
+    """
+    image = preprocess(synthetic_apple(), CONFIG)
+    masks = [segment_fruit(image, CONFIG).mask for _ in range(4)]
+    assert all(np.array_equal(masks[0], mask) for mask in masks[1:])
+
+
+def blemished_apple(
+    background: int,
+    size: int = 256,
+    texture: int = TEXTURE_AMPLITUDE,
+) -> np.ndarray:
     """A mid-brown disc carrying several dark blemishes, on a flat background."""
     image = np.full((size, size, 3), background, dtype=np.uint8)
     cv2.circle(image, (size // 2, size // 2), 75, (40, 70, 95), thickness=-1)
@@ -316,7 +409,7 @@ def blemished_apple(background: int, size: int = 256) -> np.ndarray:
             (18, 26, 34),
             thickness=-1,
         )
-    return image
+    return add_texture(image, texture)
 
 
 def test_dark_blemishes_stay_inside_the_fruit_mask():
@@ -336,15 +429,16 @@ def test_dark_blemishes_stay_inside_the_fruit_mask():
         assert result.mask[row, column] == 255, f"blemish at ({column}, {row}) fell outside the mask"
 
 
-def test_the_mask_does_not_depend_on_the_background():
+@pytest.mark.parametrize("config", [CONFIG, OTSU_CONFIG], ids=["grabcut", "otsu_v"])
+def test_the_mask_does_not_depend_on_the_background(config):
     """The same fruit must yield the same silhouette on light and dark grounds.
 
     Without hole filling the dark-background mask is riddled with blemish
     holes while the light-background one is solid, which would make every
     mask-restricted descriptor a function of the backdrop.
     """
-    on_dark = segment_fruit(preprocess(blemished_apple(background=25), CONFIG), CONFIG)
-    on_light = segment_fruit(preprocess(blemished_apple(background=235), CONFIG), CONFIG)
+    on_dark = segment_fruit(preprocess(blemished_apple(background=25), config), config)
+    on_light = segment_fruit(preprocess(blemished_apple(background=235), config), config)
 
     assert not on_dark.failed and not on_light.failed
     assert on_dark.coverage == pytest.approx(on_light.coverage, abs=0.02)

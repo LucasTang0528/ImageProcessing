@@ -37,12 +37,21 @@
   },
 
   "segmentation": {
+    "method": "grabcut",
     "close_kernel": [5, 5],
     "min_mask_fraction": 0.05,
     "max_mask_fraction": 0.95,
     "polarity": "auto",
     "on_failure": "exclude",
-    "fill_holes": true
+    "fill_holes": true,
+    "cache_masks": true,
+    "grabcut": {
+      "iterations": 5,
+      "border_scale": 0.06,
+      "core_scale": 0.28,
+      "probable_scale": 0.78,
+      "min_seed_growth": 1.5
+    }
   },
 
   "partition": {

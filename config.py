@@ -77,7 +77,27 @@ class PreprocessConfig:
 class SegmentationConfig:
     """Shared segmentation parameters, including failure-detection bounds.
 
-    ``polarity`` controls which side of the Otsu threshold is treated as fruit:
+    ``method`` selects how the fruit is separated from the background:
+
+    * ``"grabcut"`` - seeded GrabCut. The frame border is marked background,
+      a central core is marked foreground, and an intermediate ellipse is
+      marked probable foreground; GrabCut then refines the boundary from the
+      image's own colour statistics.
+    * ``"otsu_v"`` - Otsu's threshold on the HSV value channel, the method
+      named in the assignment brief.
+
+    ``otsu_v`` is retained because the brief specifies it and the report
+    compares the two, but it is not the default. On this dataset it does not
+    separate fruit from background: apples photographed on a tree yield a mask
+    of sunlit foliage, and on a rotten apple the dark side of the threshold is
+    the rot patch rather than the fruit, so the mask becomes the blemish that
+    T3 is supposed to measure *within* the mask. Worse, it fails at different
+    rates per class - 0% of Unripe against 12.5% of Rotten - so the
+    ``"exclude"`` policy would drop images class-dependently and quietly
+    rebalance the test set. ``scripts/audit_dataset.py`` reports both.
+
+    ``polarity`` applies to ``otsu_v`` only, and controls which side of the
+    threshold is treated as fruit:
 
     * ``"bright"`` - the fruit is brighter than the background;
     * ``"dark"``   - the fruit is darker than the background;
@@ -105,12 +125,15 @@ class SegmentationConfig:
     rather than on the fruit.
     """
 
+    method: str
     close_kernel: Tuple[int, int]
     min_mask_fraction: float
     max_mask_fraction: float
     polarity: str
     on_failure: str
     fill_holes: bool
+    cache_masks: bool
+    grabcut: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -274,6 +297,11 @@ def load_config(path: Path | str | None = None) -> Config:
     _validate_preprocess(preprocess)
 
     seg_raw = raw["segmentation"]
+    method = str(seg_raw.get("method", "grabcut")).lower()
+    if method not in {"grabcut", "otsu_v"}:
+        raise ValueError(
+            f"segmentation.method must be grabcut or otsu_v; got {method!r}"
+        )
     polarity = str(seg_raw.get("polarity", "auto")).lower()
     if polarity not in {"auto", "bright", "dark"}:
         raise ValueError(
@@ -284,13 +312,47 @@ def load_config(path: Path | str | None = None) -> Config:
         raise ValueError(
             f"segmentation.on_failure must be exclude or fallback; got {on_failure!r}"
         )
+    grabcut = dict(seg_raw.get("grabcut", {}))
+    scales = {
+        name: float(grabcut.get(name, default))
+        for name, default in (
+            ("border_scale", 0.06),
+            ("core_scale", 0.28),
+            ("probable_scale", 0.78),
+        )
+    }
+    if not 0.0 < scales["core_scale"] < scales["probable_scale"] < 1.0:
+        raise ValueError(
+            "segmentation.grabcut requires 0 < core_scale < probable_scale < 1; got "
+            f"{scales['core_scale']} and {scales['probable_scale']}"
+        )
+    if not 0.0 < scales["border_scale"] < 0.5:
+        raise ValueError(
+            f"segmentation.grabcut.border_scale must lie in (0, 0.5); got "
+            f"{scales['border_scale']}"
+        )
+    grabcut.update(scales)
+    grabcut["iterations"] = int(grabcut.get("iterations", 5))
+    if grabcut["iterations"] < 1:
+        raise ValueError("segmentation.grabcut.iterations must be at least 1")
+    grabcut["min_seed_growth"] = float(grabcut.get("min_seed_growth", 1.5))
+    if grabcut["min_seed_growth"] < 1.0:
+        raise ValueError(
+            "segmentation.grabcut.min_seed_growth must be at least 1.0, since a "
+            "mask can never be smaller than the core seeded as definite "
+            f"foreground; got {grabcut['min_seed_growth']}"
+        )
+
     segmentation = SegmentationConfig(
+        method=method,
         close_kernel=_as_int_pair(seg_raw["close_kernel"]),
         min_mask_fraction=float(seg_raw["min_mask_fraction"]),
         max_mask_fraction=float(seg_raw["max_mask_fraction"]),
         polarity=polarity,
         on_failure=on_failure,
         fill_holes=bool(seg_raw.get("fill_holes", True)),
+        cache_masks=bool(seg_raw.get("cache_masks", True)),
+        grabcut=grabcut,
     )
     if not 0.0 <= segmentation.min_mask_fraction < segmentation.max_mask_fraction <= 1.0:
         raise ValueError(
@@ -387,7 +449,8 @@ def describe(config: Config | None = None) -> str:
         f"  resize               : {cfg.preprocess.resize[0]} x {cfg.preprocess.resize[1]}",
         f"  Gaussian kernel      : {cfg.preprocess.gaussian_kernel}",
         f"  CLAHE clip limit     : {cfg.preprocess.clahe_clip_limit}",
-        f"  segmentation polarity: {cfg.segmentation.polarity}",
+        f"  segmentation method  : {cfg.segmentation.method}",
+        f"  segmentation polarity: {cfg.segmentation.polarity} (otsu_v only)",
         f"  mask bounds          : {cfg.segmentation.min_mask_fraction:.0%} - "
         f"{cfg.segmentation.max_mask_fraction:.0%} of frame",
         f"  test size            : {cfg.partition.test_size:.0%}",
