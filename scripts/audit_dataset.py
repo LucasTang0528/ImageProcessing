@@ -84,6 +84,10 @@ BORDER_WIDTH = 12
 #: Border-ring colour spread below which a background counts as plain.
 PLAIN_BACKGROUND_STD = 20.0
 
+#: Backprojection response above which a mask pixel counts as matching the
+#: image's own background, on the 0-255 scale the histogram is normalised to.
+BACKGROUND_MATCH_THRESHOLD = 32
+
 #: Hamming distance between difference hashes below which two images are
 #: treated as *candidate* near-duplicates of one another.
 NEAR_DUPLICATE_DISTANCE = 5
@@ -186,6 +190,56 @@ def background_only_test(
 # Checks 2 and 3: segmentation behaviour and background uniformity
 # --------------------------------------------------------------------------- #
 
+def background_leakage(
+    image_bgr: np.ndarray,
+    mask: np.ndarray,
+    threshold: int = BACKGROUND_MATCH_THRESHOLD,
+) -> float:
+    """Fraction of mask pixels whose colour matches the image's own background.
+
+    This is the statistic that decides whether an imaging-style confound can
+    actually influence the descriptors, because a descriptor only ever sees
+    pixels inside the mask.
+
+    The obvious version of this measurement - how much of the mask falls in
+    the frame border - is worthless for the GrabCut segmenter, which seeds
+    that border as *definite* background. Definite background can never become
+    foreground, so the answer is structurally zero and measures nothing. This
+    version instead builds a hue-saturation histogram of the border ring,
+    backprojects it over the whole frame, and counts mask pixels that resemble
+    it. Nothing in the segmenter forces that to any particular value.
+
+    It is a proxy, and it reads high in one specific case that is not an
+    error: when the fruit genuinely shares its colour with the background, as
+    an unripe green apple does with the leaves around it. A high score
+    therefore means "the mask contains pixels indistinguishable from this
+    image's background", which is the quantity that matters for the confound,
+    but it is not by itself proof of a segmentation mistake.
+
+    Args:
+        image_bgr: The preprocessed image the mask was computed from.
+        mask: The fruit mask.
+        threshold: Backprojection response above which a pixel counts as
+            matching the background, on the 0-255 scale the histogram is
+            normalised to.
+
+    Returns:
+        A fraction in ``[0, 1]``.
+    """
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    ring = border_ring(hsv).reshape(-1, 1, 3)
+
+    histogram = cv2.calcHist([ring], [0, 1], None, [32, 32], [0, 180, 0, 256])
+    cv2.normalize(histogram, histogram, 0, 255, cv2.NORM_MINMAX)
+    response = cv2.calcBackProject([hsv], [0, 1], histogram, [0, 180, 0, 256], 1)
+
+    selected = mask > 0
+    total = int(np.count_nonzero(selected))
+    if not total:
+        return 0.0
+    return float(np.count_nonzero((response > threshold) & selected) / total)
+
+
 def segmentation_profile(
     records: Sequence[ImageRecord],
     images: Sequence[np.ndarray],
@@ -198,8 +252,10 @@ def segmentation_profile(
     """
     rows = []
     for record, image in zip(records, images):
-        result = segment_fruit(preprocess(image, config), config)
+        preprocessed = preprocess(image, config)
+        result = segment_fruit(preprocessed, config)
         ring = border_ring(image).astype(np.float64)
+
         rows.append(
             {
                 "class": record.display_name,
@@ -208,6 +264,7 @@ def segmentation_profile(
                 "polarity": result.polarity,
                 "failed": bool(result.failed),
                 "border_std": float(ring.std(axis=0).mean()),
+                "background_leakage": background_leakage(preprocessed, result.mask),
             }
         )
     return pd.DataFrame(rows)
@@ -230,6 +287,7 @@ def summarise_profile(profile: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
             * grouped["border_std"].apply(
                 lambda values: float((values < PLAIN_BACKGROUND_STD).mean())
             ),
+            "pct_background_like": 100.0 * grouped["background_leakage"].mean(),
         }
     )
     order = [name for name in spec.display_names if name in summary.index]
@@ -391,13 +449,42 @@ def verdict(
     findings: List[str] = []
     passed = True
 
+    # A confounded background is only exploitable if background pixels reach
+    # the descriptors, and the descriptors only ever see pixels inside the
+    # mask. The two are therefore judged together: the confound sets the
+    # ceiling, and the leakage decides how much of that ceiling is reachable.
+    #
+    # See background_leakage for what is and is not being measured. The score
+    # reads high both when a mask really does contain background and when the
+    # fruit genuinely shares the background's colour, so a high value marks a
+    # dataset whose masks cannot be trusted to exclude the confound - not
+    # necessarily a segmenter that is making mistakes.
+    leakage = spread(summary, "pct_background_like")
+    worst_leakage = (
+        float(summary["pct_background_like"].max())
+        if "pct_background_like" in summary and not summary.empty
+        else float("nan")
+    )
+    masks_are_clean = worst_leakage < 15.0 and leakage < 10.0
+
     excess = background["excess_over_chance"]
-    if excess > 0.20:
+    if excess > 0.20 and not masks_are_clean:
         passed = False
         findings.append(
             f"FAIL  background alone classifies at {background['accuracy']:.1%} "
-            f"against a {background['chance']:.1%} chance level. Imaging style is "
-            f"confounded with the label."
+            f"against a {background['chance']:.1%} chance level, and up to "
+            f"{worst_leakage:.1f}% of mask pixels are indistinguishable from "
+            f"their own image's background. The imaging-style confound reaches "
+            f"the descriptors."
+        )
+    elif excess > 0.20:
+        findings.append(
+            f"WARN  background alone classifies at {background['accuracy']:.1%} "
+            f"against a {background['chance']:.1%} chance level, so imaging style "
+            f"is confounded with the label - but at most {worst_leakage:.1f}% of "
+            f"mask pixels resemble their own image's background, so descriptors "
+            f"computed over the mask can barely exploit it. Report the "
+            f"background-only figure as a control."
         )
     elif excess > 0.10:
         findings.append(
@@ -409,6 +496,17 @@ def verdict(
         findings.append(
             f"PASS  background alone classifies at {background['accuracy']:.1%}, "
             f"near the {background['chance']:.1%} chance level."
+        )
+
+    if not np.isnan(worst_leakage):
+        verdict_word = "PASS" if masks_are_clean else "FAIL"
+        if not masks_are_clean:
+            passed = False
+        findings.append(
+            f"{verdict_word}  background reaching the descriptors: at most "
+            f"{worst_leakage:.1f}% of mask pixels are indistinguishable from "
+            f"their own image's background, varying by {leakage:.1f} points "
+            f"across classes."
         )
 
     failure_spread = spread(summary, "pct_failed")

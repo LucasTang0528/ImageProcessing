@@ -150,10 +150,16 @@ def render_class_grid(
                 axis.set_title(column_titles[column], fontsize=11)
 
         status = "FAILED" if sample.segmentation.failed else "ok"
+        method = sample.segmentation.method
+        detail = (
+            method
+            if sample.segmentation.polarity == "n/a"
+            else f"{method}: {sample.segmentation.polarity}"
+        )
         axes[row][0].set_ylabel(
             f"{sample.record.name[:22]}\n"
             f"{sample.segmentation.coverage:.1%} {status}\n"
-            f"polarity: {sample.segmentation.polarity}",
+            f"{detail}",
             fontsize=7,
             rotation=0,
             ha="right",

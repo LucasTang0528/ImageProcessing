@@ -39,6 +39,7 @@ from audit_dataset import (  # noqa: E402
     BORDER_WIDTH,
     background_descriptor,
     border_ring,
+    background_leakage,
     colour_thumbnail,
     difference_hash,
     duplicate_report,
@@ -217,11 +218,62 @@ def test_summarise_profile_keeps_the_configured_class_order():
     spec = DatasetSpec(classes=("a", "b"), display_names=("Unripe", "Ripe"))
     profile = _profile(
         [
-            {"class": "Ripe", "coverage": 0.3, "polarity": "dark", "failed": False, "border_std": 40.0},
-            {"class": "Unripe", "coverage": 0.4, "polarity": "bright", "failed": False, "border_std": 50.0},
+            {"class": "Ripe", "coverage": 0.3, "polarity": "dark", "failed": False,
+             "border_std": 40.0, "background_leakage": 0.02},
+            {"class": "Unripe", "coverage": 0.4, "polarity": "bright", "failed": False,
+             "border_std": 50.0, "background_leakage": 0.03},
         ]
     )
-    assert list(summarise_profile(profile, spec).index) == ["Unripe", "Ripe"]
+    summary = summarise_profile(profile, spec)
+    assert list(summary.index) == ["Unripe", "Ripe"]
+    assert summary.loc["Unripe", "pct_background_like"] == pytest.approx(3.0)
+
+
+def test_verdict_passes_a_confounded_dataset_whose_masks_do_not_leak():
+    """A confound only matters if it can reach the descriptors.
+
+    The background-only score is a property of the dataset and does not change
+    when segmentation improves. What changes is whether background pixels end
+    up inside the mask, which is all a descriptor ever sees. A dataset whose
+    imaging style predicts the label is therefore reported as a ceiling to
+    disclose, not a disqualification, once the masks are clean.
+    """
+    summary = pd.DataFrame(
+        {
+            "pct_failed": [4.5, 0.75],
+            "pct_polarity_dark": [0.0, 0.0],
+            "mean_coverage": [0.208, 0.284],
+            "pct_background_like": [3.0, 2.0],
+        }
+    )
+    passed, findings = verdict(
+        {"accuracy": 0.74, "chance": 1 / 3, "excess_over_chance": 0.74 - 1 / 3},
+        summary,
+        {"n_pairs": 45, "n_exact": 34, "n_cross_class": 0},
+        2400,
+    )
+    assert passed is True
+    assert any("barely exploit it" in item for item in findings)
+
+
+def test_verdict_fails_when_the_confound_reaches_the_descriptors():
+    """The same confound with leaky masks must still be disqualifying."""
+    summary = pd.DataFrame(
+        {
+            "pct_failed": [0.0, 12.5],
+            "pct_polarity_dark": [13.4, 76.1],
+            "mean_coverage": [0.41, 0.24],
+            "pct_background_like": [38.0, 6.0],
+        }
+    )
+    passed, findings = verdict(
+        {"accuracy": 0.74, "chance": 1 / 3, "excess_over_chance": 0.74 - 1 / 3},
+        summary,
+        {"n_pairs": 45, "n_exact": 34, "n_cross_class": 0},
+        2400,
+    )
+    assert passed is False
+    assert any("reaches\n" in item or "reaches the" in item for item in findings)
 
 
 def test_spread_measures_the_gap_between_classes():
@@ -234,7 +286,12 @@ def test_spread_measures_the_gap_between_classes():
 def test_verdict_fails_a_dataset_whose_background_predicts_the_class():
     """The headline confound must be enough on its own to reject a dataset."""
     summary = pd.DataFrame(
-        {"pct_failed": [0.0, 0.0], "pct_polarity_dark": [10.0, 12.0], "mean_coverage": [0.4, 0.4]}
+        {
+            "pct_failed": [0.0, 0.0],
+            "pct_polarity_dark": [10.0, 12.0],
+            "mean_coverage": [0.4, 0.4],
+            "pct_background_like": [27.9, 8.3],
+        }
     )
     passed, findings = verdict(
         {"accuracy": 0.74, "chance": 1 / 3, "excess_over_chance": 0.74 - 1 / 3},
@@ -243,7 +300,7 @@ def test_verdict_fails_a_dataset_whose_background_predicts_the_class():
         2400,
     )
     assert passed is False
-    assert any(item.startswith("FAIL") and "confounded" in item for item in findings)
+    assert any(item.startswith("FAIL") and "confound" in item for item in findings)
 
 
 def test_verdict_fails_class_dependent_segmentation():
@@ -289,3 +346,54 @@ def test_verdict_fails_on_contradictory_labels():
     )
     assert passed is False
     assert any("contradicts itself" in item for item in findings)
+
+
+# --------------------------------------------------------------------------- #
+# Background leakage
+# --------------------------------------------------------------------------- #
+
+def test_background_leakage_is_low_for_a_mask_holding_only_the_fruit():
+    """A mask containing only fruit must not read as background."""
+    image = studio_image((30, 30, 220), radius=60, seed=11)
+    mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+    cv2.circle(mask, (SIZE // 2, SIZE // 2), 60, 255, thickness=-1)
+    assert background_leakage(image, mask) < 0.05
+
+
+def test_background_leakage_is_high_for_a_mask_that_swallows_the_backdrop():
+    """A mask spilling onto the backdrop must be detected as doing so."""
+    image = studio_image((30, 30, 220), radius=40, seed=12)
+    mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+    cv2.circle(mask, (SIZE // 2, SIZE // 2), 95, 255, thickness=-1)
+    assert background_leakage(image, mask) > 0.4
+
+
+def test_background_leakage_is_not_forced_to_zero_by_the_frame_border():
+    """The regression that made the first version of this metric worthless.
+
+    Measuring leakage as "how much of the mask lies in the frame border" is
+    meaningless for the GrabCut segmenter, which seeds that border as definite
+    background - a label GrabCut can never overturn - so the answer is
+    structurally zero whatever the mask actually contains. This metric must
+    still report leakage for a mask that avoids the border entirely and yet is
+    full of background-coloured pixels.
+    """
+    image = studio_image((30, 30, 220), radius=30, seed=13)
+    mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+    # An annulus well inside the frame: touches no border pixel, but sits
+    # entirely on the backdrop rather than on the fruit.
+    cv2.circle(mask, (SIZE // 2, SIZE // 2), 80, 255, thickness=-1)
+    cv2.circle(mask, (SIZE // 2, SIZE // 2), 55, 0, thickness=-1)
+
+    border = np.zeros((SIZE, SIZE), dtype=bool)
+    border[:BORDER_WIDTH, :] = border[-BORDER_WIDTH:, :] = True
+    border[:, :BORDER_WIDTH] = border[:, -BORDER_WIDTH:] = True
+    assert not np.any((mask > 0) & border), "fixture must avoid the frame border"
+
+    assert background_leakage(image, mask) > 0.9
+
+
+def test_background_leakage_of_an_empty_mask_is_zero():
+    """An empty mask has no pixels to be background, and must not divide by zero."""
+    image = studio_image((30, 30, 220), seed=14)
+    assert background_leakage(image, np.zeros((SIZE, SIZE), dtype=np.uint8)) == 0.0

@@ -160,7 +160,7 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                       # 64 tests, no dataset required
+python -m pytest tests -v                       # 98 tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
 python scripts/audit_dataset.py                 # dataset confound audit, dataset required
 ```
@@ -197,10 +197,21 @@ python scripts/audit_dataset.py --root data/candidate --classes A,B,C    # vet a
 
 | Check | What it answers |
 | :-- | :-- |
-| Background-only classification | Train the shared SVM on the border ring alone, which holds no fruit pixels. Near chance is healthy; well above chance means imaging style is confounded with the label. |
+| Background-only classification | Train the shared SVM on the border ring alone, which holds no fruit pixels. Near chance is healthy; well above chance means imaging style is confounded with the label. This is the *ceiling* of the confound. |
+| Background reaching the descriptors | What share of **mask** pixels are indistinguishable from that image's own background, by hue-saturation backprojection. A descriptor only ever sees pixels inside the mask, so this decides how much of the ceiling is actually reachable. |
 | Segmentation behaviour per class | Coverage, chosen polarity and failure rate describe the segmenter, not the fruit, so they should barely move between classes. Drift means any exclusion policy removes images class-dependently. |
 | Background uniformity per class | Separates plain studio backdrops from cluttered scenes, and explains a failure of the first check. |
 | Duplicates and near-duplicates | A duplicate spanning the train/test split leaks the answer; one spanning two classes means the labels contradict each other. |
+
+The second check deliberately does **not** measure how much of the mask falls
+in the frame border. That version is worthless for the GrabCut segmenter, which
+seeds the border as *definite* background — a label GrabCut can never overturn
+— so it returns zero whatever the mask contains. It is pinned as a regression by
+`test_background_leakage_is_not_forced_to_zero_by_the_frame_border`. The
+backprojection version reads high both when a mask really does contain
+background and when the fruit genuinely shares the background's colour, so it
+marks masks that cannot be trusted to exclude the confound rather than proving a
+segmentation mistake.
 
 Duplicate detection runs a difference hash as a cheap filter and then confirms
 each candidate against a colour thumbnail. The confirmation is not optional: a
@@ -214,20 +225,48 @@ can gate a pipeline.
 
 #### Result for the current primary dataset
 
-The Fruit Ripeness Dataset (Nurdiyansah, 2024) **fails** this audit:
+The Fruit Ripeness Dataset (Nurdiyansah, 2024) was scraped, and each class was
+photographed differently: unripe apples on the tree, rotten apples as studio
+product shots. Only 138 of its 2400 images have a plain background and 128 of
+those are Rotten.
 
-| Finding | Measurement |
-| :-- | :-- |
-| Imaging style predicts the label | Background pixels alone classify at **74.0%** against a 33.3% chance level; Unripe recall 92.5% |
-| Segmentation behaves differently per class | Failure rate 0.0% Unripe, 11.0% Ripe, 12.5% Rotten; "dark" polarity chosen for 13.4%, 45.3%, 76.1% |
-| Class-dependent exclusion | `on_failure: "exclude"` would drop 0 Unripe but 100 Rotten images, silently rebalancing the test set |
-| Duplicates | 45 within-class pairs, none cross-class |
+| Finding | Otsu-on-V | Seeded GrabCut |
+| :-- | :-- | :-- |
+| Background alone predicts the label | **74.0%** against a 33.3% chance level (Unripe recall 92.5%) | unchanged — a property of the dataset, not the segmenter |
+| Segmentation failure rate per class | 0.0 / 11.0 / 12.5% — spread **12.5 pts** | 4.5 / 0.75 / 0.5% — spread **4.0 pts** |
+| Polarity chosen per class | 13.4 / 45.3 / 76.1% "dark" — spread **62.8 pts** | not applicable |
+| Mean mask coverage spread | 0.172 | **0.076** |
+| Total segmentation failures | 188 | **46** |
+| Mask pixels indistinguishable from background (Un/Ri/Ro) | 25.3 / 21.1 / 15.3% — spread 10.0 pts | 21.7 / **4.8** / **3.0%** — spread **18.7 pts** |
+| Duplicates | 45 within-class pairs, none cross-class | — |
 
-The cause is that the set was scraped: unripe apples are photographed on the
-tree, rotten apples as studio product shots. Only 138 of its 2400 images have a
-plain background and 128 of those are Rotten, so restricting to studio shots is
-not available either — it would leave no Unripe images at all. A different
-primary dataset is required; the harness itself is unaffected.
+All figures are over the full 2400 images.
+
+Replacing the segmenter removed the class-correlated behaviour that made the
+comparison invalid, and cut background contamination on Ripe and Rotten by
+roughly four-fifths — mean leakage across the dataset fell from 20.6% to 9.8%.
+
+But **Unripe barely moved, from 25.3% to 21.7%, and the disparity between
+classes therefore widened**, from 10.0 to 18.7 points. That is the honest
+result and it is why the audit still returns `NOT SUITABLE`. A green apple
+photographed among green leaves shares its colour with its own background, so
+part of that 21.7% is not a segmentation error at all — it is the fruit
+genuinely being the colour of the foliage — and no classical segmenter
+separates the two cleanly.
+
+Two consequences for the write-up, both of which belong in Results &
+Discussion rather than being quietly absorbed:
+
+* **The comparison between techniques remains valid.** All three see identical
+  masks from one shared pipeline, so the ranking of T1, T2 and T3 — the
+  assignment's actual objective — is unaffected.
+* **The absolute accuracies carry a ceiling.** The 74% background-only figure
+  is the control to report them against, and any claim that colour separates
+  Unripe well has to be read alongside the fact that its background is the
+  same colour as the fruit.
+
+Three replacement datasets were staged and audited before this conclusion was
+reached; all three scored worse (see below).
 
 #### Vetting a replacement
 
@@ -245,12 +284,16 @@ python scripts/audit_dataset.py --root data/candidate_hilton \
 `--slug` takes a Kaggle `owner/dataset` identifier or one of the shorthands in
 `CANDIDATE_SLUGS`:
 
-| Shorthand | Dataset |
-| :-- | :-- |
-| `hilton` | `davidhilton/apple-ripeness-levels-image-dataset` |
-| `leftin` | `leftin/fruit-ripeness-unripe-ripe-and-rotten` |
-| `shawhy` | `shawhy/datasets-of-fruit-ripeness-identification` |
-| `current` | `dudinurdiyansah/fruit-ripeness-dataset` — the set that fails the audit |
+| Shorthand | Dataset | Audit result |
+| :-- | :-- | :-- |
+| `current` | `dudinurdiyansah/fruit-ripeness-dataset` | 74.0% background-only; **adopted**, with the caveats above |
+| `leftin` | `leftin/fruit-ripeness-unripe-ripe-and-rotten` | **84.3%** background-only. Has the right three class names and stable segmentation, but its Unripe class is 100% publisher-augmented (`aug_` prefix on all 1934 files) while Ripe and Rotten are ~23% augmented (`saltandpepper_`, `translation_`) — a different pipeline per class, which is what drives the score |
+| `hilton` | `davidhilton/apple-ripeness-levels-image-dataset` | **91.0%** background-only against a 20% chance level. Five percentage levels rather than three stages and no rotten class; labels do not track ripeness (bright green apples are labelled "100% ripe"), several images are heavily colour-manipulated, and it holds exact duplicate files across only 500 images |
+| `shawhy` | `shawhy/datasets-of-fruit-ripeness-identification` | Not usable: no ripeness class folders at all — one `mixed apple` directory plus a COCO `train2017`/`annotations` layout |
+
+Public apple-ripeness datasets are confounded near-universally, because each
+class tends to be collected in one session or from one source. The audit is
+worth running on any new candidate before adopting it.
 
 To adopt the winner, point `paths.primary_root` in `config.json` at its
 directory, or move it to `data/primary`. Class folder names are read from
@@ -324,14 +367,49 @@ read -> (augment, training only) -> preprocess -> segment -> extract features
 
 ---
 
-## Three deviations from the brief, and why
+## Four deviations from the brief, and why
 
-All three are recorded here rather than buried in the code, because they change
-what the harness does. All three are applied identically to every technique, so
+All four are recorded here rather than buried in the code, because they change
+what the harness does. All four are applied identically to every technique, so
 none affects the validity of the comparison, and each can be switched off in
 `config.json`.
 
+**0. Segmentation is seeded GrabCut, not Otsu on V (`segmentation.method`,
+default `"grabcut"`).** This is the largest deviation and the brief names the
+Otsu method explicitly, so the reasoning matters.
+
+Otsu on the value channel does not separate fruit from background on this
+dataset, and it fails *by class*. Over all 2400 images it flagged 0% of Unripe
+against 12.5% of Rotten, and chose the "dark" side of the threshold for 13.4%
+of Unripe against 76.1% of Rotten. On an orchard photograph the mask is sunlit
+foliage; on a rotten apple the dark side of the threshold is the rot patch, so
+the mask becomes the very blemish T3 is supposed to measure *inside* it. Under
+`on_failure: "exclude"` it would also have dropped 100 Rotten images and no
+Unripe ones, quietly rebalancing the test set.
+
+GrabCut is seeded with an explicit label image rather than the usual bounding
+rectangle: the frame border is marked definite background, a central core
+definite foreground, and the ellipse between them probable foreground. A bare
+rectangle leaves no background to model when the fruit fills the frame and
+collapsed to an empty mask on three of twelve awkward images; the label seed
+removes both failure modes. Across those same images coverage tightened from
+4–77% to 15–36%.
+
+Two consequences are handled explicitly. `cv2.grabCut` fits its colour models
+with k-means drawn from OpenCV's global RNG, so it is **not deterministic** by
+default — two techniques would be described from different masks, which is the
+one difference between techniques this study exists to exclude; the RNG is
+reseeded before every call. And because the seeded core is definite foreground,
+GrabCut can never return an empty mask, so the minimum-coverage bound can no
+longer detect an image holding no fruit; `grabcut.min_seed_growth` flags a mask
+that grew less than 1.5× its seed (a blank frame grows about 1.27×, a real
+fruit several times over).
+
+Set `"method": "otsu_v"` to run the brief's method instead. It is still
+implemented, still tested, and `scripts/audit_dataset.py` reports both.
+
 **1. Automatic Otsu polarity (`segmentation.polarity`, default `"auto"`).**
+Applies to `otsu_v` only.
 A plain Otsu threshold labels the *brighter* side as foreground. Real apple
 photographs appear on both light and dark backgrounds, so a fixed polarity
 returns an inverted mask — the background, not the fruit — on a substantial
@@ -378,7 +456,11 @@ are introduced for Otsu to mistake for fruit.
 | Timing the first call, charging import overhead to the algorithm | A discarded warm-up call precedes timing, then times are averaged | `test_extraction_timing_excludes_the_warm_up_call` |
 | Accuracy reported alone on an imbalanced test set | `classification_metrics` always returns macro and weighted F1 | — |
 | An implicit difference between techniques | Techniques receive copies and hold no harness reference | `test_a_technique_cannot_corrupt_the_shared_sample`, `test_two_techniques_receive_identical_inputs` |
-| Scoring the photography rather than the fruit | `audit_dataset.py` trains the shared classifier on background pixels alone and fails the dataset if it beats chance | `test_verdict_fails_a_dataset_whose_background_predicts_the_class` |
+| Scoring the photography rather than the fruit | `audit_dataset.py` trains the shared classifier on background pixels alone, then measures how much background survives inside the masks | `test_verdict_fails_a_dataset_whose_background_predicts_the_class`, `test_verdict_passes_a_confounded_dataset_whose_masks_do_not_leak` |
+| A "leakage" metric the segmenter satisfies by construction | Leakage is measured by backprojecting the image's own background histogram, never by position within the frame | `test_background_leakage_is_not_forced_to_zero_by_the_frame_border` |
+| Two techniques described from different masks | GrabCut's k-means initialisation draws on OpenCV's global RNG, which is reseeded before every call | `test_grabcut_is_reproducible_across_calls`, `test_two_techniques_receive_identical_inputs` |
+| A seeded mask passing as a fruit on an image containing none | GrabCut cannot return an empty mask, so a mask that grew less than `min_seed_growth` times its seed is flagged | `test_grabcut_flags_a_frame_that_holds_no_fruit`, `test_grabcut_flags_a_fruit_smaller_than_its_seed` |
+| Staging a repacked archive twice, leaking copies across the split | Matched source folders are digested by filename and size, keeping one per distinct listing | `test_a_nested_repack_of_the_same_folder_is_dropped` |
 | A segmenter that behaves differently on different classes | The audit compares coverage, polarity and failure rate across classes | `test_verdict_fails_class_dependent_segmentation` |
 | Duplicate images leaking across the split, or carrying two labels | Difference hash filter confirmed by a colour thumbnail | `test_same_silhouette_different_colour_is_not_a_duplicate`, `test_verdict_fails_on_contradictory_labels` |
 
@@ -404,8 +486,9 @@ scripts/
   sanity_check_segmentation.py   visual verification of the harness
   audit_dataset.py               confound audit; vets a dataset before adoption
 tests/
-  test_phase1_harness.py         48 tests, runnable without the dataset
-  test_dataset_audit.py          16 tests for the audit and its duplicate detector
+  test_phase1_harness.py         54 tests, runnable without the dataset
+  test_dataset_audit.py          22 tests for the audit, its leakage metric and duplicates
+  test_fetch_dataset.py          22 tests for dataset staging and class matching
 results/         all generated CSVs and PNGs
 ```
 
