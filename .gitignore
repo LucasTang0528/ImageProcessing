@@ -8,6 +8,24 @@ data/robustness/**
 results/**
 !results/.gitkeep
 
+# Credentials - never commit an API token.
+# NOTE: deliberately NOT a blanket "*.json". config.json is the experiment's
+# single source of truth and must stay tracked; a blanket rule would hide it
+# from every teammate who cloned the repo fresh.
+.kaggle/
+**/.kaggle/
+kaggle.json
+**/kaggle.json
+*credential*.json
+*credentials*.json
+*secret*.json
+*secrets*.json
+*token*.json
+service-account*.json
+service_account*.json
+.env
+.env.*
+
 # Python
 __pycache__/
 *.py[cod]

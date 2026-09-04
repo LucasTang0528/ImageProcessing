@@ -64,7 +64,67 @@ Matplotlib 3.10.8, OpenCV 5.0.0, scikit-image 0.26.0 and scikit-learn 1.8.0.
 ### 2. Datasets
 
 The datasets are not committed to this repository — they are large and
-separately licensed. Download them and arrange them exactly as below.
+separately licensed. `data/` ships with empty class folders only.
+
+#### Kaggle credentials — each teammate needs their own
+
+The API token is personal and **must never be committed or shared**. Every team
+member creates their own:
+
+1. Sign in at [kaggle.com](https://www.kaggle.com), open **Settings → API**, and
+   click **Create New Token**. A `kaggle.json` downloads.
+2. Move it to `~/.kaggle/kaggle.json` — on Windows that is
+   `C:\Users\<you>\.kaggle\kaggle.json`.
+3. On macOS or Linux, restrict it: `chmod 600 ~/.kaggle/kaggle.json`.
+4. Open the [dataset page](https://www.kaggle.com/datasets/dudinurdiyansah/fruit-ripeness-dataset)
+   once while signed in and accept its terms, or the download returns 403.
+
+`.gitignore` already excludes `.kaggle/`, `kaggle.json`, and common
+credential-file patterns. It deliberately does **not** blanket-ignore `*.json`,
+because `config.json` is the experiment's single source of truth and must stay
+tracked.
+
+#### Staging the primary dataset
+
+[scripts/fetch_dataset.py](scripts/fetch_dataset.py) runs in two stages,
+because the published folder names are undocumented and it will not guess.
+
+```bash
+python scripts/fetch_dataset.py          # stage 1: download and survey, copies nothing
+```
+
+This prints the downloaded directory tree with per-folder image counts and the
+class mapping it proposes, then stops. **Read the mapping before continuing.**
+If a class was not matched, point at it explicitly:
+
+```bash
+python scripts/fetch_dataset.py --copy --map UnripeApple=<actual folder name>
+```
+
+Otherwise:
+
+```bash
+python scripts/fetch_dataset.py --copy   # stage 2: copy the apple classes into data/primary
+```
+
+What the copy stage guarantees:
+
+- Only the **three apple classes** are copied; every other fruit is ignored.
+- If the dataset ships a `train`/`test` split, **only `train` is used**. The
+  harness performs its own seeded 80:20 stratified split, so folding in a
+  publisher's test set would silently change the fixed partition.
+- The kagglehub cache is **only read from** — never moved, modified or deleted.
+- Re-running is **idempotent**: files already staged at the same size are
+  skipped. Filename collisions between source folders get a deterministic
+  `<folder>__<name>` suffix, never a counter, so repeat runs cannot multiply
+  the dataset.
+- Every staged file is checked to **decode** via OpenCV. Any that fail are
+  listed and the script exits non-zero, rather than leaving the harness to
+  choke on them mid-run.
+- Per-class counts and any duplicate filenames are reported at the end.
+
+The generalisation and robustness sets (Phase 6) are staged by hand for now.
+Arrange all three roots as below.
 
 ```
 data/
@@ -90,6 +150,11 @@ To confirm the loader can see the data:
 ```bash
 python data.py
 ```
+
+| Script | Role |
+| :-- | :-- |
+| `scripts/fetch_dataset.py` | Downloads and stages `data/primary` from Kaggle. |
+| `scripts/sanity_check_segmentation.py` | Visual verification of the harness. |
 
 ### 3. Phase 1 — verify the harness
 
@@ -258,6 +323,7 @@ features/
   t3_lbp_blemish.py    (Phase 2)
 compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
 scripts/
+  fetch_dataset.py               downloads and stages the primary dataset
   sanity_check_segmentation.py   visual verification of the harness
 tests/
   test_phase1_harness.py         48 tests, runnable without the dataset

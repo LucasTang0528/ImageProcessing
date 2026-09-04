@@ -9,3 +9,7 @@ opencv-python>=4.9
 scikit-image>=0.22
 scikit-learn>=1.4
 pytest>=8.0
+
+# Dataset retrieval. Pinned: kagglehub's download cache layout and return
+# type have changed between releases, and scripts/fetch_dataset.py parses it.
+kagglehub==1.0.2
