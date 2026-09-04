@@ -21,12 +21,24 @@ moved, modified or deleted.
 Copying is idempotent: a file already present at the destination with the same
 size is skipped, so re-running is safe and cheap.
 
+**Staging a candidate.** The dataset originally staged here fails
+``scripts/audit_dataset.py``, so replacements have to be vetted. Pass
+``--slug`` to fetch a different dataset and ``--dest`` to stage it somewhere
+other than ``data/primary``, which leaves the current set untouched while the
+candidate is audited.
+
 Usage::
 
     python scripts/fetch_dataset.py                   # survey only
     python scripts/fetch_dataset.py --copy            # survey, then copy
     python scripts/fetch_dataset.py --copy --depth 4  # deeper tree listing
     python scripts/fetch_dataset.py --copy --map UnripeApple=unripe_apple
+
+    # Vet a candidate without disturbing data/primary:
+    python scripts/fetch_dataset.py --slug hilton
+    python scripts/fetch_dataset.py --slug hilton --copy --dest data/candidate_hilton
+    python scripts/audit_dataset.py --root data/candidate_hilton \
+        --classes UnripeApple,RipeApple,RottenApple
 """
 
 from __future__ import annotations
@@ -48,7 +60,22 @@ import numpy as np  # noqa: E402
 
 from config import Config, get_config  # noqa: E402
 
+#: Default dataset. Overridable with ``--slug`` so that a candidate can be
+#: staged and audited without disturbing whatever currently occupies
+#: ``data/primary``.
 DATASET_SLUG = "dudinurdiyansah/fruit-ripeness-dataset"
+
+#: Candidate primary datasets, by short name. The default above fails
+#: ``scripts/audit_dataset.py``: its background alone classifies at 74.0%
+#: against a 33.3% chance level, because unripe apples were scraped from
+#: orchard photographs and rotten ones from studio catalogues. These are the
+#: replacements to be vetted; none is adopted until it passes the audit.
+CANDIDATE_SLUGS: Dict[str, str] = {
+    "hilton": "davidhilton/apple-ripeness-levels-image-dataset",
+    "leftin": "leftin/fruit-ripeness-unripe-ripe-and-rotten",
+    "shawhy": "shawhy/datasets-of-fruit-ripeness-identification",
+    "current": DATASET_SLUG,
+}
 
 #: Folder-name fragments that identify a split. Only ``train`` is copied: the
 #: harness performs its own seeded 80:20 stratified split, and folding a
@@ -343,11 +370,14 @@ def parse_map(values: Iterable[str]) -> Dict[str, str]:
     return mapping
 
 
-def download() -> Path:
+def download(slug: str = DATASET_SLUG) -> Path:
     """Download the dataset and return the kagglehub cache path.
 
     Credentials are handled entirely by ``kagglehub`` from
     ``~/.kaggle/kaggle.json``. Nothing here touches or displays them.
+
+    Args:
+        slug: The Kaggle ``owner/dataset`` identifier to fetch.
     """
     try:
         import kagglehub
@@ -356,9 +386,9 @@ def download() -> Path:
             "kagglehub is not installed. Run: pip install -r requirements.txt"
         ) from error
 
-    print(f"Downloading {DATASET_SLUG} via kagglehub ...")
+    print(f"Downloading {slug} via kagglehub ...")
     try:
-        cache_path = Path(kagglehub.dataset_download(DATASET_SLUG))
+        cache_path = Path(kagglehub.dataset_download(slug))
     except Exception as error:  # noqa: BLE001 - surface any kagglehub failure plainly
         raise SystemExit(
             f"kagglehub could not download the dataset: {error}\n\n"
@@ -390,13 +420,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Force a class to a source folder name, e.g. "
         "--map UnripeApple=unripe_apple. Repeatable.",
     )
+    parser.add_argument(
+        "--slug",
+        default=None,
+        help="Kaggle dataset to fetch: either an owner/dataset identifier or "
+        f"one of the shorthands {', '.join(sorted(CANDIDATE_SLUGS))} "
+        f"(default: {DATASET_SLUG}).",
+    )
+    parser.add_argument(
+        "--dest",
+        type=Path,
+        default=None,
+        help="Directory to stage into, relative to the project root "
+        "(default: the configured data/primary). Use a separate directory to "
+        "vet a candidate with audit_dataset.py before adopting it.",
+    )
     args = parser.parse_args(argv)
 
     config: Config = get_config()
     extensions = config.image_extensions
     overrides = parse_map(args.map)
 
-    cache_path = download()
+    slug = CANDIDATE_SLUGS.get(args.slug, args.slug) if args.slug else DATASET_SLUG
+    if args.dest is None:
+        destination_root = config.paths.primary_root
+    elif args.dest.is_absolute():
+        destination_root = args.dest
+    else:
+        destination_root = config.paths.project_root / args.dest
+
+    cache_path = download(slug)
 
     print("=" * 78)
     print("DOWNLOADED DATASET STRUCTURE")
@@ -447,9 +500,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"  python scripts/fetch_dataset.py --copy --map {missing[0]}=<folder name>"
             )
         else:
+            flags = f" --slug {args.slug}" if args.slug else ""
+            flags += f" --dest {args.dest}" if args.dest else ""
             print(
                 "\nIf the mapping above is correct, stage the files with:\n"
-                "  python scripts/fetch_dataset.py --copy"
+                f"  python scripts/fetch_dataset.py --copy{flags}"
             )
         return 0
 
@@ -462,12 +517,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print()
     print("=" * 78)
-    print("COPYING INTO data/primary")
+    print(f"COPYING INTO {destination_root}")
     print("=" * 78)
 
     report = CopyReport()
     for class_name in config.primary.classes:
-        destination = config.paths.primary_root / class_name
+        destination = destination_root / class_name
         copy_class(class_name, matched[class_name], destination, extensions, report)
         print(
             f"  {class_name:<14} {report.copied[class_name]:>5} copied, "
@@ -480,7 +535,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("=" * 78)
     grand_total = 0
     for class_name in config.primary.classes:
-        destination = config.paths.primary_root / class_name
+        destination = destination_root / class_name
         total = verify_destination(destination, extensions, report)
         grand_total += total
         print(f"  {class_name:<14} {total:>5} files staged")
@@ -504,7 +559,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     print("\n  All staged files decode correctly.")
-    print("\nNext: python scripts/sanity_check_segmentation.py")
+
+    # The audit comes before the visual check, and before any feature work: a
+    # dataset whose imaging style predicts the label produces flattering
+    # numbers that no later stage can detect or correct.
+    if destination_root == config.paths.primary_root:
+        print("\nNext: python scripts/audit_dataset.py")
+    else:
+        relative = destination_root.relative_to(config.paths.project_root)
+        print(
+            f"\nNext, vet this candidate before adopting it:\n"
+            f"  python scripts/audit_dataset.py --root {relative.as_posix()} "
+            f"--classes {','.join(config.primary.classes)}"
+        )
     return 0
 
 

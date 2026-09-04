@@ -229,6 +229,34 @@ plain background and 128 of those are Rotten, so restricting to studio shots is
 not available either — it would leave no Unripe images at all. A different
 primary dataset is required; the harness itself is unaffected.
 
+#### Vetting a replacement
+
+Stage each candidate into its own directory, audit it, and adopt only one that
+passes. `data/primary` is left untouched throughout, so nothing is lost if a
+candidate turns out to be worse.
+
+```bash
+python scripts/fetch_dataset.py --slug hilton                      # survey only
+python scripts/fetch_dataset.py --slug hilton --copy --dest data/candidate_hilton
+python scripts/audit_dataset.py --root data/candidate_hilton \
+    --classes UnripeApple,RipeApple,RottenApple
+```
+
+`--slug` takes a Kaggle `owner/dataset` identifier or one of the shorthands in
+`CANDIDATE_SLUGS`:
+
+| Shorthand | Dataset |
+| :-- | :-- |
+| `hilton` | `davidhilton/apple-ripeness-levels-image-dataset` |
+| `leftin` | `leftin/fruit-ripeness-unripe-ripe-and-rotten` |
+| `shawhy` | `shawhy/datasets-of-fruit-ripeness-identification` |
+| `current` | `dudinurdiyansah/fruit-ripeness-dataset` — the set that fails the audit |
+
+To adopt the winner, point `paths.primary_root` in `config.json` at its
+directory, or move it to `data/primary`. Class folder names are read from
+`datasets.primary.classes`, so a dataset using different names needs either a
+`--map` at staging time or an edit to that list.
+
 ### Phases 2–6
 
 Not yet implemented. Each phase is built and verified in turn.

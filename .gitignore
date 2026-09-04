@@ -2,6 +2,7 @@
 data/primary/**
 data/generalisation/**
 data/robustness/**
+data/candidate*/**
 !data/**/.gitkeep
 
 # Downloaded dataset archives, staged before extraction. The extracted folders
