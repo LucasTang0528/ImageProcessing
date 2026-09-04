@@ -217,6 +217,57 @@ def classify_folder(path: Path) -> Optional[str]:
     return None
 
 
+def folder_signature(folder: Path, extensions: Sequence[str]) -> str:
+    """Return a digest of a folder's image filenames and sizes.
+
+    Two folders holding the same files produce the same digest. Only names and
+    sizes are read, never contents, so the check costs a stat per file.
+    """
+    permitted = {ext.lower() for ext in extensions}
+    entries = sorted(
+        (entry.name, entry.stat().st_size)
+        for entry in folder.iterdir()
+        if entry.is_file() and entry.suffix.lower() in permitted
+    )
+    digest = hashlib.sha1()
+    for name, size in entries:
+        digest.update(f"{name}:{size}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def drop_duplicate_folders(
+    folders: Sequence[Path],
+    extensions: Sequence[str],
+) -> Tuple[List[Path], List[Path]]:
+    """Remove source folders that repeat a folder already in the list.
+
+    Published archives are often repacked with their whole tree nested inside
+    itself, so that ``dataset/train/rottenapples`` and
+    ``dataset/dataset/train/rottenapples`` are the same 2342 files. Copying
+    both would stage every image twice under different names, and the
+    duplicates would then be split across the train and test partitions,
+    putting a byte-identical copy of a test image into training.
+
+    The shallowest path wins, being the one the publisher most likely meant.
+
+    Returns:
+        The folders to copy, and the duplicates that were dropped.
+    """
+    keep: List[Path] = []
+    dropped: List[Path] = []
+    seen: Dict[str, Path] = {}
+
+    for folder in sorted(folders, key=lambda p: (len(p.parts), str(p).lower())):
+        signature = folder_signature(folder, extensions)
+        if signature in seen:
+            dropped.append(folder)
+            continue
+        seen[signature] = folder
+        keep.append(folder)
+
+    return keep, dropped
+
+
 def find_apple_folders(
     root: Path,
     extensions: Sequence[str],
@@ -233,6 +284,8 @@ def find_apple_folders(
     Returns:
         A tuple of ``(matched, skipped_non_train, ignored)`` where ``matched``
         maps each config class name to the source folders found for it.
+        Folders repeating one already matched for the same class are dropped;
+        see :func:`drop_duplicate_folders`.
     """
     matched: Dict[str, List[Path]] = defaultdict(list)
     skipped_non_train: List[Path] = []
@@ -254,7 +307,17 @@ def find_apple_folders(
             continue
         matched[class_name].append(folder)
 
-    return dict(matched), skipped_non_train, ignored
+    deduplicated: Dict[str, List[Path]] = {}
+    for class_name, folders in matched.items():
+        keep, dropped = drop_duplicate_folders(folders, extensions)
+        deduplicated[class_name] = keep
+        for folder in dropped:
+            print(
+                f"  note: ignoring {folder.relative_to(root)} - it repeats "
+                f"{keep[0].relative_to(root)} file for file"
+            )
+
+    return deduplicated, skipped_non_train, ignored
 
 
 # --------------------------------------------------------------------------- #
