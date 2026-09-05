@@ -76,10 +76,18 @@
   },
 
   "t1_colour": {
-    "colour_space": "HSV",
-    "bins": 32,
-    "s_min": 40,
-    "v_max": 240
+    "_comment": "T1 is the MPEG-7 Dominant Colour Descriptor. specular_lightness and decay_lightness_max are OpenCV 8-bit L (L* x 2.55); specular_chroma, green_a_max and decay_chroma_max are in CIE a*b* units.",
+    "n_colours": 4,
+    "space": "LAB",
+    "exclude_specular": true,
+    "specular_lightness": 240.0,
+    "specular_chroma": 12.0,
+    "sample_size": 5000,
+    "coherency_min_fraction": 0.01,
+    "green_a_max": 0.0,
+    "decay_chroma_max": 25.0,
+    "decay_lightness_max": 115.0,
+    "blocks": "ABC"
   },
 
   "t2_glcm": {

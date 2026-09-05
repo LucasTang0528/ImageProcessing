@@ -1,14 +1,28 @@
-# FreshSight - Phase 1 dependencies.
+# FreshSight dependencies.
+#
 # Classical image processing only: no deep learning framework appears here,
 # and none may be added.
-numpy>=1.26
-scipy>=1.11
-pandas>=2.0
-matplotlib>=3.8
-opencv-python>=4.9
-scikit-image>=0.22
-scikit-learn>=1.4
-pytest>=8.0
+#
+# Versions are pinned exactly rather than bounded. Three people run this
+# codebase and the report quotes specific numbers, so an identical environment
+# is part of reproducing them. Two pins carry particular weight:
+#
+#   scikit-learn - KMeans defaults n_init="auto" from 1.4 onwards, and the
+#     value "auto" resolves differently depending on the initialisation
+#     method. T1 sets n_init explicitly for this reason, but the pin keeps the
+#     rest of the estimator behaviour fixed too.
+#   scikit-image - graycomatrix/graycoprops were renamed from the British
+#     spelling in 0.19 and the old names are gone in this release, and
+#     regionprops has gained keyword-only arguments. Code written against an
+#     older release will not run here, and vice versa.
+numpy==2.4.4
+scipy==1.17.1
+pandas==3.0.2
+matplotlib==3.10.8
+opencv-python==5.0.0
+scikit-image==0.26.0
+scikit-learn==1.8.0
+pytest==9.1.1
 
 # Dataset retrieval. Pinned: kagglehub's download cache layout and return
 # type have changed between releases, and scripts/fetch_dataset.py parses it.

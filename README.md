@@ -11,9 +11,9 @@ classical techniques, and a CNN would answer a different question.
 
 | Technique | Descriptor family | Dimensionality | Status |
 | :-- | :-- | :-- | :-- |
-| T1 | Colour distribution descriptors | 105 | Phase 2 |
+| T1 | MPEG-7 dominant colour descriptor | 37 | **Built** |
 | T2 | GLCM texture descriptors | 40 | Phase 2 |
-| T3 | LBP + morphological blemish descriptors | 34 | Phase 2 |
+| T3 | Multiscale morphological descriptors | 36 | Phase 2 |
 
 ---
 
@@ -160,7 +160,7 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                       # 98 tests, no dataset required
+python -m pytest tests -v                      # 139 tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
 python scripts/audit_dataset.py                 # dataset confound audit, dataset required
 ```
@@ -477,9 +477,9 @@ harness.py       preprocessing, segmentation, augmentation, partition, pipeline,
 evaluate.py      metrics, cross-validation, timing, confusion matrices, CSV/PNG output
 features/
   base.py        the FeatureExtractor interface every technique must implement
-  t1_colour.py         (Phase 2)
-  t2_glcm.py           (Phase 2)
-  t3_lbp_blemish.py    (Phase 2)
+  t1_dominant_colour.py  MPEG-7 dominant colour descriptor, 37 dimensions
+  t2_glcm.py             (Phase 2)
+  t3_morphology.py       (Phase 2)
 compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
 scripts/
   fetch_dataset.py               downloads and stages the primary dataset
@@ -489,6 +489,7 @@ tests/
   test_phase1_harness.py         54 tests, runnable without the dataset
   test_dataset_audit.py          22 tests for the audit, its leakage metric and duplicates
   test_fetch_dataset.py          22 tests for dataset staging and class matching
+  test_t1_dominant_colour.py     41 tests for T1, its ordering and its angular statistics
 results/         all generated CSVs and PNGs
 ```
 
