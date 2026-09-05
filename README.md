@@ -12,7 +12,7 @@ classical techniques, and a CNN would answer a different question.
 | Technique | Descriptor family | Dimensionality | Status |
 | :-- | :-- | :-- | :-- |
 | T1 | MPEG-7 dominant colour descriptor | 37 | **Built** |
-| T2 | GLCM texture descriptors | 40 | Phase 2 |
+| T2 | GLCM texture descriptors | 40 | **Built** |
 | T3 | Multiscale morphological descriptors | 36 | Phase 2 |
 
 ---
@@ -160,7 +160,7 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                      # 139 tests, no dataset required
+python -m pytest tests -v                      # 174 tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
 python scripts/audit_dataset.py                 # dataset confound audit, dataset required
 ```
@@ -478,7 +478,7 @@ evaluate.py      metrics, cross-validation, timing, confusion matrices, CSV/PNG 
 features/
   base.py        the FeatureExtractor interface every technique must implement
   t1_dominant_colour.py  MPEG-7 dominant colour descriptor, 37 dimensions
-  t2_glcm.py             (Phase 2)
+  t2_glcm.py             GLCM texture descriptors, 40 dimensions
   t3_morphology.py       (Phase 2)
 compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
 scripts/
@@ -490,6 +490,7 @@ tests/
   test_dataset_audit.py          22 tests for the audit, its leakage metric and duplicates
   test_fetch_dataset.py          22 tests for dataset staging and class matching
   test_t1_dominant_colour.py     41 tests for T1, its ordering and its angular statistics
+  test_t2_glcm.py                35 tests for T2, background exclusion and degenerate matrices
 results/         all generated CSVs and PNGs
 ```
 

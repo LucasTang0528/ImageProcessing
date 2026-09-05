@@ -270,11 +270,14 @@ def test_shuffling_pixel_order_does_change_spatial_coherency(apple):
     is constant - and a constant feature carries no information at all.
 
     The dominant cluster is exempted deliberately. Scattering it does not make
-    it incoherent, because randomly placed pixels covering more than about 27%
-    of the area percolate into one giant connected component on an
-    8-connected grid. That is a property of the grid, not a defect in the
-    descriptor, and the minor clusters below that density do collapse to zero
-    as expected.
+    it incoherent, because randomly placed pixels above the site percolation
+    threshold join into one giant connected component. For a square lattice
+    that threshold is about 0.593 under 4-connectivity and about 0.407 under
+    the 8-connected Moore neighbourhood, which is what the coherency block
+    uses. The dominant cluster here covers roughly 56% of the fruit, above
+    0.407, so it percolates; the minor clusters sit near 15%, well below, and
+    collapse to zero as expected. That is a property of the lattice, not a
+    defect in the descriptor.
     """
     image, mask = apple
     extractor = DominantColourExtractor()

@@ -33,10 +33,32 @@ arithmetic mean is undefined: a fruit with hues at 359 deg and 1 deg averages
 to 180 deg, the opposite colour. Every hue statistic here is computed by
 projecting onto the unit circle and averaging the vectors.
 
-Colour space note: OpenCV's 8-bit L*a*b* is used, which is D65. It stores
-``L`` as ``L* x 2.55`` in ``[0, 255]`` and ``a``/``b`` offset by 128 while
-keeping CIE magnitudes, so a specular threshold of ``L > 240`` corresponds to
-``L* > 94`` and a chroma threshold of 12 is 12 CIE units.
+Colour space and units
+----------------------
+
+OpenCV's 8-bit L*a*b* is used, which is D65. It stores ``L`` as ``L* x 2.55``
+in ``[0, 255]`` and offsets ``a`` and ``b`` by 128 while keeping CIE
+magnitudes, so lightness is scaled between the two systems and chroma is not.
+Every threshold in this module is therefore quoted in **true CIE units**, with
+the 8-bit equivalent alongside wherever the implementation works in it:
+
+===================  =====================  ============================
+Threshold            True CIE               OpenCV 8-bit
+===================  =====================  ============================
+Specular lightness   ``L* > 94``            ``L >= 240``
+Specular chroma      ``chroma < 12``        ``chroma < 12`` (unchanged)
+Decay lightness      ``L* < 45``            ``L < 115``
+Decay chroma         ``chroma < 25``        ``chroma < 25`` (unchanged)
+===================  =====================  ============================
+
+The two specular thresholds are only coherent as a pair in the 8-bit reading:
+in true CIE units ``L*`` cannot exceed 100, so a literal ``L* > 240`` would
+never fire and specular exclusion would silently do nothing.
+
+The decay thresholds were fixed a priori, before this descriptor was run on
+any real image, and have not been refitted since. They are therefore free of
+any tuning-on-test concern, and equally they are not optimised: Phase 5 is the
+place to fit them by cross-validation on the training folds alone.
 """
 
 from __future__ import annotations
@@ -176,7 +198,7 @@ class DominantColourExtractor(FeatureExtractor):
         coherency_min_fraction: float = 0.01,
         green_a_max: float = 0.0,
         decay_chroma_max: float = 25.0,
-        decay_lightness_max: float = 115.0,
+        decay_lightness_max: float = 45.0,
         blocks: str = "ABC",
         seed: int = 42,
     ) -> None:
@@ -186,8 +208,10 @@ class DominantColourExtractor(FeatureExtractor):
             n_colours: Number of dominant colours, ``N`` in the MPEG-7 sense.
             space: Clustering space, one of ``LAB``, ``HSV`` or ``RGB``.
             exclude_specular: Drop specular highlights before clustering.
-            specular_lightness: Minimum OpenCV 8-bit ``L`` for a pixel to count
-                as specular. 240 corresponds to ``L* > 94``.
+            specular_lightness: Minimum OpenCV 8-bit ``L`` for a pixel to
+                count as specular. The default 240 is ``L* > 94`` in true CIE
+                units; it is expressed in the 8-bit encoding because a literal
+                CIE value above 100 is unreachable.
             specular_chroma: Maximum CIE chroma for a pixel to count as
                 specular. A highlight is bright *and* colourless; requiring
                 both stops a genuinely bright yellow fruit being discarded.
@@ -197,8 +221,11 @@ class DominantColourExtractor(FeatureExtractor):
             green_a_max: Upper bound on CIE ``a*`` for a cluster to count as
                 green. Zero is the neutral axis.
             decay_chroma_max: Upper bound on CIE chroma for the decay index.
-            decay_lightness_max: Upper bound on OpenCV 8-bit ``L`` for the
-                decay index. 115 corresponds to ``L* < 45``.
+                Chroma is unscaled between the two encodings, so 25 means the
+                same in both.
+            decay_lightness_max: Upper bound on **true CIE** ``L*`` for the
+                decay index. The default 45 is ``L < 115`` in the 8-bit
+                encoding, well clear of black.
             blocks: Which blocks to emit, a subset of ``"ABC"`` in order.
             seed: Seed for subsampling and for k-means.
 
@@ -609,7 +636,7 @@ class DominantColourExtractor(FeatureExtractor):
         green = shares[a_star < self.green_a_max].sum() * 100.0
         decayed = shares[
             (chroma < self.decay_chroma_max)
-            & (lightness * LAB_L_SCALE < self.decay_lightness_max)
+            & (lightness < self.decay_lightness_max)
         ].sum() * 100.0
 
         return np.array(
@@ -640,7 +667,7 @@ class DominantColourExtractor(FeatureExtractor):
             coherency_min_fraction=float(block.get("coherency_min_fraction", 0.01)),
             green_a_max=float(block.get("green_a_max", 0.0)),
             decay_chroma_max=float(block.get("decay_chroma_max", 25.0)),
-            decay_lightness_max=float(block.get("decay_lightness_max", 115.0)),
+            decay_lightness_max=float(block.get("decay_lightness_max", 45.0)),
             blocks=str(block.get("blocks", "ABC")),
             seed=int(getattr(config, "seed", 42)),
         )

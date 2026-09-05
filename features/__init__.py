@@ -5,7 +5,7 @@ interface and nothing else, so the harness can call all three
 polymorphically without knowing which is which.
 
 * ``t1_dominant_colour`` - MPEG-7 dominant colour descriptor (37 dimensions)
-* ``t2_glcm`` - GLCM texture descriptors (40 dimensions, pending)
+* ``t2_glcm`` - GLCM texture descriptors (40 dimensions)
 * ``t3_morphology`` - multiscale morphological descriptors (36, pending)
 """
 
@@ -16,6 +16,7 @@ from features.base import (
     validate_vector,
 )
 from features.t1_dominant_colour import DominantColourExtractor
+from features.t2_glcm import GLCMExtractor
 
 __all__ = [
     "FeatureExtractor",
@@ -23,4 +24,5 @@ __all__ = [
     "validate_vector",
     "require_non_empty_mask",
     "DominantColourExtractor",
+    "GLCMExtractor",
 ]
