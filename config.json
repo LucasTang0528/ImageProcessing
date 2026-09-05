@@ -106,6 +106,20 @@
     "min_blemish_area": 10
   },
 
+  "ingest": {
+    "_comment": "Dataset staging only. Nothing here affects the experiment; scripts/ingest_dataset.py is the sole reader. class_aliases lets the survey recognise a renamed publisher folder without editing the script.",
+    "local_source": "~/Downloads/archive",
+    "kaggle_slug": "dudinurdiyansah/fruit-ripeness-dataset",
+    "ignore_dirs": ["test", "val", "valid", "validation"],
+    "match_threshold": 0.6,
+    "review_threshold": 0.3,
+    "class_aliases": {
+      "UnripeApple": ["unripe apple", "unripe_apple", "green apple", "raw apple"],
+      "RipeApple": ["ripe apple", "ripe_apple", "good apple"],
+      "RottenApple": ["rotten apple", "rotten_apple", "bad apple", "spoiled apple"]
+    }
+  },
+
   "sanity_check": {
     "images_per_class": 12
   }
