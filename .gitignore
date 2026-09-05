@@ -48,3 +48,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Generated results site (rebuild with scripts/build_site.py)
+site/

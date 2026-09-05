@@ -511,12 +511,17 @@ features/
   base.py        the FeatureExtractor interface every technique must implement
   t1_dominant_colour.py  MPEG-7 dominant colour descriptor, 37 dimensions
   t2_glcm.py             GLCM texture descriptors, 40 dimensions
-  t3_morphology.py       (Phase 2)
+  t3_morphological.py    multiscale morphological descriptors, 36 dimensions
 compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
+site/            generated results site; not committed, rebuild it with build_site.py
 scripts/
   fetch_dataset.py               downloads and stages the primary dataset
+  ingest_dataset.py              surveys a local or downloaded copy and stages it
   sanity_check_segmentation.py   visual verification of the harness
   audit_dataset.py               confound audit; vets a dataset before adoption
+  run_benchmarks.py              runs every implemented technique through the harness
+  build_site.py                  turns a benchmark run into the local results site
+  site_template.html             the site's markup; build_site.py copies it verbatim
 tests/
   test_phase1_harness.py         54 tests, runnable without the dataset
   test_dataset_audit.py          22 tests for the audit, its leakage metric and duplicates
@@ -525,6 +530,31 @@ tests/
   test_t2_glcm.py                35 tests for T2, background exclusion and degenerate matrices
 results/         all generated CSVs and PNGs
 ```
+
+## Viewing the results
+
+The benchmark writes CSVs and PNGs; `build_site.py` turns one of those runs into
+a small page you can open in a browser and click through.
+
+```bash
+python scripts/run_benchmarks.py --per-class 300 --no-augment --tag pilot3
+python scripts/build_site.py --tag pilot3
+python -m http.server 8000 --directory site
+```
+
+Then open <http://localhost:8000>. The page has two halves:
+
+- a **dashboard** ranking every implemented technique on macro F1, accuracy and
+  cross-validated accuracy, with the chance level marked on each bar; and
+- an **explorer** where you choose a class, a picture and a technique, and see
+  what that technique predicted for that picture, with what probability, and
+  which of its descriptor values produced that answer.
+
+Every picture offered comes from the held-out test split, so nothing shown was
+trained on. The page quotes the figures straight out of `results/<tag>/` rather
+than recomputing them, and `build_site.py` re-fits the same pipeline on the same
+partition to obtain the per-image predictions, so the explorer and the dashboard
+cannot drift apart. `site/` is generated output and is not committed.
 
 ## Team
 
