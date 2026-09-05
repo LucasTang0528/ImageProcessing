@@ -188,7 +188,7 @@ class Config:
     classifier: ClassifierConfig
     t1_colour: Mapping[str, Any] = field(default_factory=dict)
     t2_glcm: Mapping[str, Any] = field(default_factory=dict)
-    t3_lbp_blemish: Mapping[str, Any] = field(default_factory=dict)
+    t3_morphological: Mapping[str, Any] = field(default_factory=dict)
     sanity_check: Mapping[str, Any] = field(default_factory=dict)
     raw: Mapping[str, Any] = field(default_factory=dict)
 
@@ -411,7 +411,7 @@ def load_config(path: Path | str | None = None) -> Config:
         classifier=classifier,
         t1_colour=dict(raw.get("t1_colour", {})),
         t2_glcm=dict(raw.get("t2_glcm", {})),
-        t3_lbp_blemish=dict(raw.get("t3_lbp_blemish", {})),
+        t3_morphological=dict(raw.get("t3_morphological", {})),
         sanity_check=dict(raw.get("sanity_check", {})),
         raw=raw,
     )

@@ -6,7 +6,7 @@ polymorphically without knowing which is which.
 
 * ``t1_dominant_colour`` - MPEG-7 dominant colour descriptor (37 dimensions)
 * ``t2_glcm`` - GLCM texture descriptors (40 dimensions)
-* ``t3_morphology`` - multiscale morphological descriptors (36, pending)
+* ``t3_morphological`` - multiscale morphological descriptors (36 dimensions)
 """
 
 from features.base import (
@@ -17,6 +17,7 @@ from features.base import (
 )
 from features.t1_dominant_colour import DominantColourExtractor
 from features.t2_glcm import GLCMExtractor
+from features.t3_morphological import T3MorphologicalExtractor
 
 __all__ = [
     "FeatureExtractor",
@@ -25,4 +26,5 @@ __all__ = [
     "require_non_empty_mask",
     "DominantColourExtractor",
     "GLCMExtractor",
+    "T3MorphologicalExtractor",
 ]

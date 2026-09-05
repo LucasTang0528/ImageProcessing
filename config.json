@@ -97,13 +97,20 @@
     "angle_averaged": false
   },
 
-  "t3_lbp_blemish": {
-    "lbp_configs": [[8, 1], [16, 2]],
+  "t3_morphological": {
+    "_comment": "Multiscale morphological descriptors. LBP was dropped: it is outside the BMDS2133 syllabus, and its hue-deviation blemish stage reused the colour evidence T1 is built on. hue_deviation/saturation_deviation/value_deviation survive only as the E3.4 comparator that measures what dropping it cost. mm_per_px stays 1.0 while no calibration stage exists, so blemish areas are reported in pixels.",
+    "r_max": 7,
+    "se_shape": "ellipse",
+    "tophat_radius": 9,
+    "min_blemish_area": 15,
+    "blemish_method": "bth_otsu",
+    "fixed_threshold": 30,
+    "exclude_poles": false,
+    "pole_fraction": 0.15,
+    "mm_per_px": 1.0,
     "hue_deviation": 20.0,
     "saturation_deviation": 60.0,
-    "value_deviation": 60.0,
-    "open_kernel": [3, 3],
-    "min_blemish_area": 10
+    "value_deviation": 60.0
   },
 
   "ingest": {

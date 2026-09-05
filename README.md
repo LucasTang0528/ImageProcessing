@@ -13,7 +13,7 @@ classical techniques, and a CNN would answer a different question.
 | :-- | :-- | :-- | :-- |
 | T1 | MPEG-7 dominant colour descriptor | 37 | **Built** |
 | T2 | GLCM texture descriptors | 40 | **Built** |
-| T3 | Multiscale morphological descriptors | 36 | Phase 2 |
+| T3 | Multiscale morphological descriptors | 36 | **Built** |
 
 ---
 
@@ -160,7 +160,7 @@ python data.py
 
 ```bash
 python config.py                                # print the active configuration
-python -m pytest tests -v                      # 174 tests, no dataset required
+python -m pytest tests -v                      # 244 tests, no dataset required
 python scripts/sanity_check_segmentation.py     # visual check, dataset required
 python scripts/audit_dataset.py                 # dataset confound audit, dataset required
 ```
@@ -300,6 +300,146 @@ directory, or move it to `data/primary`. Class folder names are read from
 `datasets.primary.classes`, so a dataset using different names needs either a
 `--map` at staging time or an edit to that list.
 
+### 5. T3 internal experiments
+
+Four questions about the morphological descriptor, each answered by 5-fold
+stratified cross-validation on the **training partition only**. The test split
+is drawn by the harness and then left alone, so nothing tuned here can be
+justified by the numbers it will later be judged against.
+
+```bash
+python scripts/run_t3_experiments.py --per-class 150     # pilot
+python scripts/run_t3_experiments.py                     # the reported run
+```
+
+| ID | Variable | Sweep | Output |
+| :-- | :-- | :-- | :-- |
+| E3.1 | Multiscale contribution | full 36 vs Blocks C+D (10 dims) vs Blocks A+B (18 dims) | `e3_1_ablation.csv` |
+| E3.2 | Structuring element shape | ellipse, rectangle, cross | `e3_2_se_shape.csv` |
+| E3.3 | Maximum granulometric radius | `r_max` in {5, 7, 9, 11} | `e3_3_rmax.csv` |
+| E3.4 | Blemish segmentation | black top hat + Otsu, fixed threshold, hue deviation | `e3_4_segmentation.csv` |
+
+All eight extractor configurations are scored on **one** segmentation pass.
+Preprocessing and seeded GrabCut cost far more than the descriptor does and are
+identical across variants by construction, so running them once and fanning out
+is both faster and stricter than eight independent passes, which could drift
+apart. `run_config.json` records the configuration each run used, alongside the
+dataset it ran on and that dataset's audit verdict.
+
+E3.3 changes the vector length — 32, 36, 40 and 44 dimensions — and the CSV
+reports accuracy against dimensionality rather than padding the arms to match.
+
+#### E3.4 needs annotations that do not exist yet
+
+E3.4 is specified to be scored on mean absolute blemish-ratio error against
+manually annotated masks, and classification accuracy cannot stand in for it: a
+method can mislabel which pixels are blemished and still hand the classifier
+something separable, so accuracy answers a different question. No annotations
+exist in this repository, so `mean_abs_ratio_error_vs_annotation` is emitted as
+`NaN` and `annotations_available` as `false` rather than being quietly filled
+with a substitute metric.
+
+```bash
+python scripts/annotate_blemishes.py --count 30   # paint them
+python scripts/annotate_blemishes.py --list       # progress so far
+python scripts/run_t3_experiments.py              # re-run; the column fills in
+```
+
+Annotation happens in the preprocessed 224 × 224 frame, so a painted mask lines
+up pixel for pixel with what the extractor returns, and images are sampled from
+the training partition only, so annotating cannot leak the test set. Everything
+E3.4 *can* measure without ground truth is reported meanwhile: blemish ratio per
+class per method, the proportion of fruit each method finds nothing on, and how
+far each comparator departs from the method the technique actually uses.
+
+#### Results, over all 2400 images
+
+1886 training rows after 34 segmentation failures were excluded, augmentation
+off, 5-fold stratified CV. Accuracies below are **cross-validated on the
+training partition**, not test-set figures, and they inherit the dataset's 74%
+background-only ceiling.
+
+| E3.1 arm | Dims | CV accuracy |
+| :-- | --: | :-- |
+| Full 36 | 36 | **0.7163 ± 0.0063** |
+| Blocks A+B, spectrum only | 18 | 0.6145 ± 0.0287 |
+| Blocks C+D, responses only | 10 | 0.5891 ± 0.0304 |
+
+The multiscale spectrum earns its place: neither half reaches the whole, and
+the full vector beats the better half by 10 points.
+
+| E3.2 shape | CV accuracy | | E3.3 `r_max` | Dims | CV accuracy |
+| :-- | :-- | --- | :-- | --: | :-- |
+| Ellipse | 0.7163 ± 0.0063 | | 5 | 32 | 0.6882 ± 0.0159 |
+| Rectangle | 0.7116 ± 0.0190 | | 7 | 36 | 0.7163 ± 0.0063 |
+| Cross | 0.7121 ± 0.0124 | | 9 | 40 | **0.7190 ± 0.0232** |
+| | | | 11 | 44 | 0.7116 ± 0.0173 |
+
+Structuring element shape does not matter: the three arms sit inside each
+other's fold-to-fold spread, so the isotropy argument for a disc is a
+justification for the choice rather than a measured advantage. Radius 9 leads
+radius 7 by 0.0027 with a spread of 0.0232, which is not a difference; radius 5
+is genuinely worse, and 11 buys nothing for eight more dimensions.
+
+#### E3.4 found something that needs saying plainly
+
+| Method | CV accuracy | Mean blemish ratio | Fruit with no blemish found |
+| :-- | :-- | --: | --: |
+| Black top hat + Otsu | 0.7163 ± 0.0063 | 19.3% | 0.0% |
+| Fixed threshold | 0.7147 ± 0.0172 | 23.2% | 0.0% |
+| Hue deviation | **0.7412 ± 0.0224** | 31.8% | 0.1% |
+
+Two results here point the same way, and neither is good news for the Block E
+features as they stand.
+
+**Otsu never returns nothing.** It is a relative threshold, so it splits
+whatever histogram it is handed. Every one of the 1886 fruit was found to be
+19.3% blemished on average, including the clean Unripe ones — Unripe 18.6%,
+Ripe 17.2%, Rotten 22.2%. A descriptor that reports a fifth of every apple as
+damaged is not measuring damage; the class separation in Block E is coming from
+how the peel's texture shifts the Otsu cut point, not from blemish extent. The
+unit tests confirm the zero path works on a synthetically flat fruit, so this is
+a property of real peel texture rather than a coding error.
+
+**Hue deviation wins, which is exactly why it was dropped.** It scores 2.5
+points above the method the technique actually uses. That is not evidence for
+bringing it back — it is the measurement the specification predicted: hue
+deviation reads the same colour evidence T1 is built on, so on a dataset where
+background and colour are confounded with the label it will beat a
+geometry-only method, while telling the comparison nothing about morphology.
+Reporting it as a win would mean T3 quietly re-running part of T1.
+
+Both readings hang on `mean_abs_ratio_error_vs_annotation`, which is still NaN.
+Ground truth is what separates "this method finds blemishes badly" from "this
+peel really is mottled", and it is the one measurement that can settle whether
+Block E deserves its eight dimensions.
+
+#### Two gaps between the specification and what it can deliver
+
+Both were found by the T3 test suite, both are pinned by tests rather than
+silently patched, and both are the specification's call to make rather than the
+implementation's.
+
+* **The top hat reaches past the interior guard.** Section 6 erodes the mask by
+  `r_max + 1`, which is 8 px at the default radius, and Section 8 then runs both
+  top hats with a disc of radius 9. An interior pixel is only guaranteed to be
+  8 px inside the mask, so a radius-9 top hat samples up to 1 px beyond the mask
+  edge, into filled background rather than peel. The mean fill makes that a soft
+  edge rather than a cliff, so the effect is small — but Blocks A, B and D are
+  fully isolated from the boundary and Block C is not. Closing the gap would
+  change every Block C value, so it is not a change to make quietly.
+* **`exclude_poles` is close to a no-op at its documented defaults.** The audit
+  measured mean mask coverage between 0.208 and 0.284 of the frame, which is a
+  mask radius of 58 to 67 px, so the 15% pole band is 8.6 to 10.1 px wide. The
+  interior erosion has already removed the outer 8 px before the guard runs,
+  leaving it a sliver 0.6 to 2.1 px deep to act on — far too thin to hold a
+  component that clears `min_blemish_area`. The guard works, and the tests
+  exercise it at a wider band, but reporting its effect at the default settings
+  would be reporting approximately nothing. Either the band or the erosion has
+  to move for the option to mean anything.
+
+---
+
 ### Recorded for Phase 4 — hypotheses and reruns
 
 Raised during Phase 2 review and deliberately **not acted on yet**. Each is
@@ -339,7 +479,7 @@ Not yet implemented. Each phase is built and verified in turn.
 | Phase | Deliverable | Status |
 | :-- | :-- | :-- |
 | 1 | Shared harness, evaluation module, visual sanity check | **Complete** |
-| 2 | The three feature extractors, with unit tests | Pending |
+| 2 | The three feature extractors, with unit tests | **Complete** |
 | 3 | Individual benchmarks | Pending |
 | 4 | Comparison, paired t-tests, ranking | Pending |
 | 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Pending |
@@ -520,6 +660,8 @@ scripts/
   sanity_check_segmentation.py   visual verification of the harness
   audit_dataset.py               confound audit; vets a dataset before adoption
   run_benchmarks.py              runs every implemented technique through the harness
+  run_t3_experiments.py          T3 internal experiments E3.1 to E3.4
+  annotate_blemishes.py          paints the ground-truth blemish masks E3.4 needs
   build_site.py                  turns a benchmark run into the local results site
   site_template.html             the site's markup; build_site.py copies it verbatim
 tests/
@@ -528,6 +670,7 @@ tests/
   test_fetch_dataset.py          22 tests for dataset staging and class matching
   test_t1_dominant_colour.py     41 tests for T1, its ordering and its angular statistics
   test_t2_glcm.py                35 tests for T2, background exclusion and degenerate matrices
+  test_t3.py                     70 tests for T3, its boundary guards and pole exclusion
 results/         all generated CSVs and PNGs
 ```
 
@@ -562,7 +705,7 @@ cannot drift apart. `site/` is generated output and is not committed.
 | :-- | :-- | :-- |
 | Ong Song Wei | 2414328 | T1 — Colour distribution descriptors |
 | Tang Khuan Zhi | 2414351 | T2 — GLCM texture descriptors |
-| Tang Yue Hann | 2414352 | T3 — LBP and morphological blemish descriptors |
+| Tang Yue Hann | 2414352 | T3 — Multiscale morphological descriptors |
 
 ## References
 
