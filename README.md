@@ -300,6 +300,38 @@ directory, or move it to `data/primary`. Class folder names are read from
 `datasets.primary.classes`, so a dataset using different names needs either a
 `--map` at staging time or an edit to that list.
 
+### Recorded for Phase 4 — hypotheses and reruns
+
+Raised during Phase 2 review and deliberately **not acted on yet**. Each is
+settled against Phase 3 output rather than by argument.
+
+**H1 — Flip augmentation interacts differently with each technique.** T1 is
+strictly flip-invariant by construction, so a horizontally flipped training
+image is an exact duplicate row in T1's feature space. T2's GLCM at 45° and
+135° is orientation-sensitive, so the same augmentation yields genuinely
+distinct rows there. The harness is identical for all three and invariance to
+a transform is a property under comparison rather than a confound — but
+duplicate rows do affect SVM margins. *Action: rerun all three with flip
+augmentation disabled and report whether the ranking changes.*
+
+**H2 — T2's error structure may be complementary to T1's, not opposite.** The
+brief predicts colour separates Unripe/Ripe while confusing Ripe/Rotten, with
+texture showing the reverse. Early T2 figures point elsewhere: contrast at
+distance 1, angle 0 runs Unripe 2.75, Rotten 2.63, Ripe 2.07 — a U-shape in
+which **Ripe is the smoothest class and Unripe and Rotten are both rougher**.
+If that holds, T2 confuses Unripe with Rotten, which is the pair colour
+separates most cleanly, making the two techniques complementary rather than
+opposite. *Action: test against the Phase 3 confusion matrices; do not
+speculate beyond what they support.*
+
+**H3 — Absolute accuracy is bounded by the dataset confound.** Background
+pixels alone classify at 74.0% against a 33.3% chance level. Report every
+headline accuracy against that control, and treat Unripe-specific colour
+claims with particular care: 21.7% of Unripe mask pixels are
+indistinguishable from their own image's background. *Action: report the
+control alongside the benchmark matrix, and run the ranking on a
+low-leakage subset as a sensitivity check.*
+
 ### Phases 2–6
 
 Not yet implemented. Each phase is built and verified in turn.
