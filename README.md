@@ -14,6 +14,9 @@ classical techniques, and a CNN would answer a different question.
 | T1 | MPEG-7 dominant colour descriptor | 37 | **Built** |
 | T2 | GLCM texture descriptors | 40 | **Built** |
 | T3 | Multiscale morphological descriptors | 36 | **Built** |
+| E1 | Feature-level fusion (T1+T2+T3, PCA to 95% var) | 113 → PCA | **Built** |
+| E2 | Blemish-aware regional weighting (T1+T2 over healthy/blemished peel) | 154 | **Built** |
+| E3 | Weighted decision-level fusion (soft vote by CV macro F1) | — | **Built** |
 
 ---
 
@@ -440,6 +443,82 @@ implementation's.
 
 ---
 
+### 6. Benchmark and rank the techniques (Phases 3–4)
+
+Phase 3 scores each technique in isolation through the shared harness. Phase 4
+consumes that run and decides whether the gap between the top two is real.
+
+```bash
+python scripts/run_benchmarks.py --per-class 300 --no-augment --tag pilot
+python scripts/run_benchmarks.py --tag phase3            # the reported run
+python scripts/run_comparison.py --tag phase3            # rank + paired t-tests
+```
+
+`run_benchmarks.py` writes `benchmark_matrix.csv` (headline metrics, per-fold
+accuracy and macro F1), the per-class tables, the normalised confusion matrices
+and the segmentation-failure log into `results/<tag>/`.
+
+`run_comparison.py` reads only those per-fold columns — never the test
+partition — and adds three files to the same directory:
+
+| File | Contents |
+| :-- | :-- |
+| `comparison_matrix.csv` | one row per technique: rank, CV mean ± std, test accuracy, dimensionality, whether it clears the 80% bar |
+| `pairwise_ttests.csv` | every technique pair: mean fold gap, paired *t*, raw *p*, Holm-adjusted *p*, verdict |
+| `ranking.txt` | the ranked list, the significance verdict for the top two, and the target and background-only controls printed alongside |
+
+The ranking is built on the five cross-validation folds, and each pairwise gap
+is a paired *t*-test over those folds (Demšar, 2006) with a Holm step-down
+correction for running one test per pair. A two- or three-point gap on the
+single test split is not enough to call a winner, so `ranking.txt` states
+plainly when the top two sit inside each other's fold-to-fold spread. Both
+controls — the 80% target and the 74.0% background-only accuracy from the audit
+— are reported next to the headline number rather than left implicit.
+
+`compare.py` is covered by `tests/test_compare.py` (25 tests, no dataset
+needed).
+
+---
+
+### 7. Combine the techniques (Phase 5 enhancements)
+
+Report §3.8. Once the three techniques are benchmarked in isolation they are
+combined three ways, and **each strategy is scored on its own against the
+strongest individual technique** — the contribution of each is attributable
+rather than reported as one aggregate improvement (Gap 1).
+
+| | Strategy | What it does |
+| :-- | :-- | :-- |
+| E1 | Feature-level fusion | standardise the three vectors, concatenate (37 + 40 + 36 = 113), PCA to 95% variance, then the shared SVM |
+| E2 | Blemish-aware regional weighting | the T3 blemish mask splits the fruit into healthy and blemished peel; T1 and T2 are recomputed over each sub-region and concatenated (154-D), so a localised defect is no longer averaged across the whole surface. The study's principal novel contribution |
+| E3 | Weighted decision-level fusion | one SVM per technique; their calibrated probabilities are soft-voted with weights equal to each technique's cross-validated macro F1 |
+
+```bash
+python scripts/run_enhancements.py --per-class 200 --no-augment --tag pilot
+python scripts/run_enhancements.py --tag phase5          # the reported run
+```
+
+One shared segmentation pass builds the T1/T2/T3 matrices and derives E1 and E2;
+E3 is fitted from the three individual matrices. Everything is scored on the
+same 5-fold leakage-safe CV and the same held-out test partition the individual
+techniques use, so an enhancement's gain over the best technique is a paired
+comparison over identical folds. Outputs in `results/<tag>/`:
+
+| File | Contents |
+| :-- | :-- |
+| `enhancement_matrix.csv` | one row per technique and enhancement: dimensionality, CV mean ± std, per-fold accuracy, test accuracy and macro/weighted F1 |
+| `enhancement_vs_best.csv` | E1, E2, E3 each against the best individual technique — mean fold gap, paired *t*, *p*, and whether it clears the report's +3-point bar |
+| `ablation.csv` | E1 and E3 rebuilt with one technique dropped at a time, so each technique's marginal contribution to the hybrid is quantified |
+| `enhancement_ranking.txt` | all six ranked, with the significance verdict and both controls |
+| `E{1,2,3}_confusion.png` | normalised confusion matrix per enhancement |
+
+E1's PCA basis, E3's per-fold sub-models and every scaler are fitted on the
+training fold alone; E3's voting weights come from CV on the training partition
+only. `enhance.py` is covered by `tests/test_enhance.py` (17 tests, no dataset
+needed); the image-level pass is exercised by the pilot run.
+
+---
+
 ### Recorded for Phase 4 — hypotheses and reruns
 
 Raised during Phase 2 review and deliberately **not acted on yet**. Each is
@@ -480,9 +559,10 @@ Not yet implemented. Each phase is built and verified in turn.
 | :-- | :-- | :-- |
 | 1 | Shared harness, evaluation module, visual sanity check | **Complete** |
 | 2 | The three feature extractors, with unit tests | **Complete** |
-| 3 | Individual benchmarks | Pending |
-| 4 | Comparison, paired t-tests, ranking | Pending |
-| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Pending |
+| 3 | Individual benchmarks | Driver built (`scripts/run_benchmarks.py`); full run pending |
+| 4 | Comparison, paired t-tests, ranking | Code built (`compare.py`, `scripts/run_comparison.py`); waiting on the Phase 3 run |
+| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Pending (T3's E3.1–E3.4 done; T1/T2 pending) |
+| 5b | Enhancements E1/E2/E3 and the hybrid | Code built (`enhance.py`, `scripts/run_enhancements.py`); waiting on the full run |
 | 6 | Held-out generalisation and robustness sets | Pending |
 
 ---
@@ -652,7 +732,8 @@ features/
   t1_dominant_colour.py  MPEG-7 dominant colour descriptor, 37 dimensions
   t2_glcm.py             GLCM texture descriptors, 40 dimensions
   t3_morphological.py    multiscale morphological descriptors, 36 dimensions
-compare.py       (Phase 4) benchmark matrix, paired t-tests, ranking
+compare.py       (Phase 4) ranking, paired t-tests over the CV folds, Holm correction
+enhance.py       (Phase 5) E1 feature fusion, E2 regional weighting, E3 decision fusion
 site/            generated results site; not committed, rebuild it with build_site.py
 scripts/
   fetch_dataset.py               downloads and stages the primary dataset
@@ -660,6 +741,8 @@ scripts/
   sanity_check_segmentation.py   visual verification of the harness
   audit_dataset.py               confound audit; vets a dataset before adoption
   run_benchmarks.py              runs every implemented technique through the harness
+  run_comparison.py              (Phase 4) ranks a benchmark run and tests each pairwise gap
+  run_enhancements.py            (Phase 5) builds E1/E2/E3, scores each against the best technique
   run_t3_experiments.py          T3 internal experiments E3.1 to E3.4
   annotate_blemishes.py          paints the ground-truth blemish masks E3.4 needs
   build_site.py                  turns a benchmark run into the local results site
@@ -671,6 +754,8 @@ tests/
   test_t1_dominant_colour.py     41 tests for T1, its ordering and its angular statistics
   test_t2_glcm.py                35 tests for T2, background exclusion and degenerate matrices
   test_t3.py                     70 tests for T3, its boundary guards and pole exclusion
+  test_compare.py                25 tests for the Phase 4 ranking, the paired t-test and Holm
+  test_enhance.py                17 tests for the soft vote, aligned fusion and the E2 sub-regions
 results/         all generated CSVs and PNGs
 ```
 

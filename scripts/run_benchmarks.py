@@ -164,6 +164,7 @@ def benchmark(
             "cv_mean_macro_f1": cv.mean_macro_f1,
             "cv_std_macro_f1": cv.std_macro_f1,
             **{f"cv_fold{i + 1}_accuracy": float(s) for i, s in enumerate(cv.accuracy_folds)},
+            **{f"cv_fold{i + 1}_macro_f1": float(s) for i, s in enumerate(cv.macro_f1_folds)},
             "extraction_mean_s": extraction["mean_s"],
             "extraction_median_s": extraction["median_s"],
             "inference_mean_s": inference,
