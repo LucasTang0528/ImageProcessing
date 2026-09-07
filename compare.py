@@ -208,11 +208,29 @@ class ComparisonReport:
     dimensionality: Dict[str, int]
     target_accuracy: float = TARGET_ACCURACY
     control_accuracy: Optional[float] = None
+    target_techniques: Optional[List[str]] = None
 
     @property
     def best(self) -> str:
         """Short name of the top-ranked technique."""
         return self.ranking[0]
+
+    @property
+    def best_of_target_scope(self) -> str:
+        """Best entry the accuracy target is actually set against.
+
+        The assignment's 80% bar applies to the best **individual technique**,
+        not to whatever tops the ranking. When a report ranks enhancements
+        alongside techniques - Phase 5 does - the leader is often an
+        enhancement, and reading the target against it would credit the bar to
+        the wrong thing. ``target_techniques`` names the entries in scope;
+        with it unset every entry is in scope, which is right for Phase 4,
+        where only the three techniques are ranked.
+        """
+        if not self.target_techniques:
+            return self.best
+        in_scope = [name for name in self.ranking if name in set(self.target_techniques)]
+        return in_scope[0] if in_scope else self.best
 
     @property
     def runner_up(self) -> Optional[str]:
@@ -312,10 +330,18 @@ class ComparisonReport:
 
         test, adjusted = self.pair(self.best, self.runner_up)
         verdict = "significant" if adjusted < self.alpha else "NOT significant"
+        # pair() returns the test in the order the pairs were generated, which
+        # need not put the winner first. The sentence below reads "best over
+        # runner-up", so both the gap and the t statistic are re-oriented to
+        # that direction; printed raw, a pair stored the other way round
+        # renders as "+-0.0138" and reverses the sign of t.
+        flip = -1.0 if test.technique_a != self.best else 1.0
+        gap = flip * test.mean_difference
+        t_statistic = flip * test.t_statistic
         lines.append(
             f"Best technique: {self.best} "
-            f"(+{test.mean_difference:.4f} over {self.runner_up}, "
-            f"paired t = {test.t_statistic:.3f}, "
+            f"({gap:+.4f} over {self.runner_up}, "
+            f"paired t = {t_statistic:.3f}, "
             f"p = {test.p_value:.4f}, Holm p = {adjusted:.4f}) -> {verdict} at "
             f"alpha = {self.alpha}"
         )
@@ -328,19 +354,26 @@ class ComparisonReport:
 
         if self.metric == "accuracy":
             lines.append("")
-            best_mean = self.mean_score(self.best)
+            scored = self.best_of_target_scope
+            best_mean = self.mean_score(scored)
             clears = best_mean >= self.target_accuracy
             lines.append(
                 f"Target (>= {self.target_accuracy:.0%} for the best individual "
-                f"technique): {self.best} at {best_mean:.4f} "
+                f"technique): {scored} at {best_mean:.4f} "
                 f"{'clears it' if clears else 'does NOT clear it'}."
             )
+            if scored != self.best:
+                lines.append(
+                    f"  {self.best} ranks higher at {self.mean_score(self.best):.4f}, "
+                    f"but it is an enhancement, not an individual technique, so it "
+                    f"is not what this target is set against."
+                )
             if self.control_accuracy is not None:
                 margin = best_mean - self.control_accuracy
                 lines.append(
                     f"Background-only control: {self.control_accuracy:.4f}. "
-                    f"The best technique is {margin:+.4f} relative to a classifier "
-                    f"that never sees the fruit."
+                    f"{scored} is {margin:+.4f} relative to a classifier that never "
+                    f"sees the fruit."
                 )
 
         return "\n".join(lines)
@@ -355,6 +388,7 @@ def compare(
     dimensionality: Optional[Mapping[str, int]] = None,
     target_accuracy: float = TARGET_ACCURACY,
     control_accuracy: Optional[float] = None,
+    target_techniques: Optional[Sequence[str]] = None,
 ) -> ComparisonReport:
     """Rank techniques by their per-fold scores and test every pairwise gap.
 
@@ -369,6 +403,12 @@ def compare(
         dimensionality: Optional feature vector length per technique.
         target_accuracy: The assignment's bar for the best individual technique.
         control_accuracy: Optional background-only accuracy, for context.
+        target_techniques: Names the entries the accuracy target is set
+            against, when the comparison also ranks things the target does not
+            apply to. Phase 5 ranks enhancements beside the three techniques,
+            and the 80% bar belongs to the techniques alone; leaving this unset
+            reads the target against whatever tops the ranking, which is right
+            only when every ranked entry is in scope.
 
     Returns:
         A :class:`ComparisonReport`.
@@ -415,6 +455,7 @@ def compare(
         dimensionality=dict(dimensionality or {}),
         target_accuracy=target_accuracy,
         control_accuracy=control_accuracy,
+        target_techniques=list(target_techniques) if target_techniques else None,
     )
 
 

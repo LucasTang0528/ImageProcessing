@@ -208,6 +208,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         test_accuracy={n: float(matrix.loc[n, "test_accuracy"]) for n in matrix.index},
         dimensionality={n: int(matrix.loc[n, "dimensionality"]) for n in matrix.index},
         control_accuracy=control,
+        # The 80% bar is set against the best individual technique. This
+        # ranking also carries E1/E2/E3, and an enhancement usually tops it,
+        # so the scope has to be stated or the target gets read against the
+        # wrong row.
+        target_techniques=("T1", "T2", "T3"),
     )
     best_individual = max(("T1", "T2", "T3"), key=lambda n: fold_scores[n].mean())
     vs_best = pd.DataFrame(

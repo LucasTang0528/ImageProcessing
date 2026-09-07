@@ -186,6 +186,60 @@ def test_matrix_frame_carries_rank_cv_and_target_columns():
     assert bool(frame.loc["T3", "clears_target"]) is False
 
 
+def test_the_verdict_reports_the_gap_in_the_direction_it_claims():
+    """The winner's lead must read positive however the pair was stored.
+
+    Pairs are generated in insertion order, so the leader is often the second
+    name in its own comparison and its raw mean_difference is negative. Printed
+    unoriented that renders as "+-0.0138" and flips the sign of t.
+    """
+    folds = {
+        "E1": [0.90, 0.91, 0.92, 0.90, 0.91],
+        "E2": [0.93, 0.94, 0.93, 0.92, 0.94],
+    }
+    report = compare(folds)
+    assert report.best == "E2"
+
+    stored, _ = report.pair("E2", "E1")
+    assert stored.technique_a == "E1"          # stored the other way round
+    assert stored.mean_difference < 0
+
+    summary = report.summary_text()
+    assert "Best technique: E2 (+0.0240 over E1" in summary
+    assert "+-" not in summary
+    assert "paired t = -" not in summary
+
+
+def test_the_accuracy_target_is_read_against_the_best_individual_technique():
+    """An enhancement topping the ranking must not be credited with the bar.
+
+    Phase 5 ranks E1/E2/E3 alongside T1/T2/T3, and a fusion normally wins. The
+    assignment's 80% target is set against the best *individual* technique, so
+    the summary has to name T1 here even though E1 outranks it.
+    """
+    folds = {
+        "T1": [0.81, 0.82, 0.80, 0.81, 0.82],
+        "T2": [0.60, 0.61, 0.59, 0.62, 0.60],
+        "E1": [0.88, 0.89, 0.87, 0.88, 0.89],
+    }
+    report = compare(folds, target_techniques=("T1", "T2"))
+
+    assert report.best == "E1"
+    assert report.best_of_target_scope == "T1"
+
+    summary = report.summary_text()
+    assert "for the best individual technique): T1 at 0.8120 clears it." in summary
+    assert "E1 ranks higher at 0.8820" in summary
+
+
+def test_without_a_target_scope_the_target_follows_the_ranking():
+    """Phase 4 ranks only the three techniques, so the leader is in scope."""
+    report = compare(_folds())
+    assert report.target_techniques is None
+    assert report.best_of_target_scope == report.best == "T1"
+    assert "technique): T1 at" in report.summary_text()
+
+
 def test_pairwise_frame_has_one_row_per_pair_with_holm_column():
     report = compare(_folds())
     frame = report.pairwise_frame()
