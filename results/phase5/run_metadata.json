@@ -1,0 +1,18 @@
+{
+  "mode": "FULL",
+  "per_class": "all",
+  "augmentation": true,
+  "n_train_rows": 7542,
+  "n_test_rows": 468,
+  "excluded_train": 138,
+  "excluded_test": 12,
+  "e3_weights": {
+    "T1": 0.905009417242318,
+    "T2": 0.6231464604808229,
+    "T3": 0.757721797105725
+  },
+  "best_individual": "T1",
+  "seed": 42,
+  "segmentation_method": "grabcut",
+  "background_only_control": 0.7395833333333334
+}

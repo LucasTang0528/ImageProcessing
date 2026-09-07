@@ -43,8 +43,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
-from typing import Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 from sklearn.base import clone
 from sklearn.decomposition import PCA
@@ -123,6 +124,102 @@ def default_extractors(config: Optional[Config] = None) -> Dict[str, FeatureExtr
     }
 
 
+#: How many random placements the control mask tries before keeping the best.
+#: A spun mask can overhang the fruit and lose area; a handful of attempts is
+#: enough to find one that does not, and the loop stops as soon as it does.
+CONTROL_MASK_ATTEMPTS = 8
+
+
+def e2_block_columns(t1_dim: int, t2_dim: int) -> Dict[str, np.ndarray]:
+    """Column indices of E2's four blocks, in the order :func:`_regional_vector` emits them.
+
+    The layout is defined by that function and nowhere else, so the ablation
+    reads it from here rather than recomputing offsets at the call site, where
+    a change to the layout would silently mislabel an arm instead of failing.
+
+    Args:
+        t1_dim: Length of one T1 block.
+        t2_dim: Length of one T2 block.
+
+    Returns:
+        ``{"t1_healthy", "t1_blemished", "t2_healthy", "t2_blemished"}`` mapped
+        to index arrays.
+    """
+    bounds = np.cumsum([0, t1_dim, t1_dim, t2_dim, t2_dim])
+    names = ("t1_healthy", "t1_blemished", "t2_healthy", "t2_blemished")
+    return {
+        name: np.arange(bounds[i], bounds[i + 1])
+        for i, name in enumerate(names)
+    }
+
+
+def random_control_mask(
+    fruit_mask: np.ndarray,
+    blemish_mask: np.ndarray,
+    rng: np.random.Generator,
+    attempts: int = CONTROL_MASK_ATTEMPTS,
+) -> np.ndarray:
+    """A blemish mask of the same size and shape, moved somewhere else on the fruit.
+
+    This is E2's null hypothesis made concrete. E2 splits the peel in two and
+    describes each half, which doubles the dimensionality; a gain over the
+    unsplit descriptors could therefore be nothing but the extra dimensions and
+    the extra parameters they buy. The control keeps every one of those - same
+    154 columns, same two sub-regions, same areas - and changes only **where**
+    the boundary between them falls. If the gain survives, it is about the
+    blemish mask locating real damage. If it does not, it never was.
+
+    The mask is **rotated about the fruit's centroid** rather than replaced by
+    random pixels. That matters: scattering the same number of pixels across
+    the fruit would also destroy the spatial coherency that T1's block B
+    measures, so a beaten control would show only that coherent regions beat
+    speckle - a different and much weaker claim. Rotating preserves the area,
+    the shape, the number of connected components and their coherency exactly,
+    and varies the one thing under test.
+
+    Args:
+        fruit_mask: The fruit mask; the control never leaves it.
+        blemish_mask: The real blemish mask for this image.
+        rng: Seeded generator. Seed it per image, not per pass, so the control
+            for one image does not depend on how many images preceded it.
+        attempts: Rotations to try before keeping the largest.
+
+    Returns:
+        A ``uint8`` mask, 255 inside the control region, the shape of
+        ``fruit_mask``. An empty blemish mask returns an empty control, which
+        is correct: a clean apple has nothing to relocate, and the arm then
+        describes it exactly as E2 does.
+    """
+    fruit = np.asarray(fruit_mask).astype(bool)
+    blemish = np.asarray(blemish_mask).astype(bool) & fruit
+    target = int(np.count_nonzero(blemish))
+    if target == 0:
+        return np.zeros(fruit.shape, dtype=np.uint8)
+
+    rows, columns = np.nonzero(fruit)
+    centre = (float(columns.mean()), float(rows.mean()))
+    source = (blemish.astype(np.uint8) * 255)
+    height, width = fruit.shape
+
+    best = np.zeros(fruit.shape, dtype=bool)
+    best_area = -1
+    for _ in range(max(1, attempts)):
+        angle = float(rng.uniform(0.0, 360.0))
+        rotation = cv2.getRotationMatrix2D(centre, angle, 1.0)
+        spun = cv2.warpAffine(
+            source, rotation, (width, height),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        candidate = (spun > 127) & fruit
+        area = int(np.count_nonzero(candidate))
+        if area > best_area:
+            best, best_area = candidate, area
+        if area >= 0.95 * target:
+            break
+
+    return best.astype(np.uint8) * 255
+
+
 def _regional_vector(
     t1: FeatureExtractor,
     t2: FeatureExtractor,
@@ -167,6 +264,7 @@ def build_technique_matrices(
     augment: bool = False,
     extractors: Optional[Mapping[str, FeatureExtractor]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    include_random_control: bool = False,
 ) -> TechniqueMatrices:
     """Run all three techniques, and derive E1 and E2, in a single pass.
 
@@ -184,9 +282,14 @@ def build_technique_matrices(
             for the test partition.
         extractors: Optional ``{"T1":..., "T2":..., "T3":...}`` override.
         progress: Optional ``(done, total)`` console callback.
+        include_random_control: Also build ``E2_random``, the ablation control
+            in which each image's blemish mask is relocated on the fruit by
+            :func:`random_control_mask`. Off by default, so nothing that does
+            not ask for it pays the second regional pass or sees a new key.
 
     Returns:
-        A :class:`TechniqueMatrices`.
+        A :class:`TechniqueMatrices`. Its ``matrices`` holds ``T1``, ``T2``,
+        ``T3``, ``E1`` and ``E2``, plus ``E2_random`` when it was asked for.
     """
     cfg = config or get_config()
     ext = dict(extractors or default_extractors(cfg))
@@ -194,8 +297,11 @@ def build_technique_matrices(
     if not isinstance(t3, T3MorphologicalExtractor):
         raise TypeError("E2 needs the T3 extractor to expose extract_with_aux")
 
-    rows: Dict[str, List[np.ndarray]] = {k: [] for k in ("T1", "T2", "T3", "E1", "E2")}
-    times: Dict[str, List[float]] = {k: [] for k in ("T1", "T2", "T3", "E1", "E2")}
+    names = ["T1", "T2", "T3", "E1", "E2"]
+    if include_random_control:
+        names.append("E2_random")
+    rows: Dict[str, List[np.ndarray]] = {k: [] for k in names}
+    times: Dict[str, List[float]] = {k: [] for k in names}
     labels: List[int] = []
     paths: List = []
     groups: List[int] = []
@@ -249,6 +355,21 @@ def build_technique_matrices(
         v_e2 = _regional_vector(t1, t2, image, mask, aux["blemish_mask"])
         times["E2"].append(time.perf_counter() - start + times["T3"][-1])
 
+        if include_random_control:
+            # Seeded from the image's own identity rather than from a counter
+            # advanced through the pass, so the control mask for one image is
+            # the same whether it is described alone or in the middle of the
+            # whole dataset, and does not shift when an earlier image is
+            # excluded by a segmentation failure.
+            control_rng = np.random.default_rng(
+                [cfg.seed, sample.record_index, sample.variant]
+            )
+            start = time.perf_counter()
+            control = random_control_mask(mask, aux["blemish_mask"], control_rng)
+            v_control = _regional_vector(t1, t2, image, mask, control)
+            times["E2_random"].append(time.perf_counter() - start + times["T3"][-1])
+            rows["E2_random"].append(v_control)
+
         rows["T1"].append(v1)
         rows["T2"].append(v2)
         rows["T3"].append(v3)
@@ -286,7 +407,7 @@ def build_technique_matrices(
         )
 
     return TechniqueMatrices(
-        matrices={name: matrix(name) for name in ("T1", "T2", "T3", "E1", "E2")},
+        matrices={name: matrix(name) for name in names},
         excluded=excluded,
         failures=failures,
     )
@@ -465,6 +586,83 @@ def fit_decision_fusion(
 # Cross-validation for the enhancements
 # --------------------------------------------------------------------------- #
 
+@dataclass(frozen=True)
+class OutOfFoldPredictions:
+    """Every validation prediction the cross-validation made, pooled.
+
+    A fold's predictions are thrown away today: only its accuracy and macro F1
+    survive, which is enough to rank a configuration and not enough to say
+    *which* class it fails on. Keeping them costs nothing - they are already
+    computed - and it is the only way to give an ablation arm a per-class
+    breakdown, because an ablation arm is never fitted on the training
+    partition and never predicts the test split.
+
+    Every row here is a validation row, so no prediction was made by a model
+    that had seen that image. :func:`~harness.leakage_safe_folds` puts only
+    originals on the validation side, so the pooled set holds one prediction
+    per original image and none for an augmented variant.
+
+    Attributes:
+        technique: Short name of the configuration scored.
+        y_true: Ground-truth labels, in pooling order.
+        y_pred: Predicted labels, in the same order.
+        rows: Index into the source matrix each prediction came from, so a
+            wrong answer can be traced back to the image that produced it.
+    """
+
+    technique: str
+    y_true: np.ndarray
+    y_pred: np.ndarray
+    rows: np.ndarray
+
+
+def cross_validate_matrix_detailed(
+    matrix: FeatureMatrix,
+    config: Optional[Config] = None,
+    technique: Optional[str] = None,
+    pipeline: Optional[Pipeline] = None,
+) -> Tuple[CrossValidationReport, OutOfFoldPredictions]:
+    """:func:`cross_validate_matrix`, also returning the pooled predictions.
+
+    This holds the fold loop; :func:`cross_validate_matrix` is a wrapper that
+    discards the second return value. Structuring it this way rather than
+    writing a second loop is deliberate - two loops could drift, and then a
+    per-class table would describe a slightly different cross-validation from
+    the accuracy printed beside it.
+    """
+    cfg = config or get_config()
+    name = technique or matrix.technique
+    estimator = pipeline or build_pipeline(cfg)
+
+    accuracies: List[float] = []
+    macro_f1s: List[float] = []
+    fit_times: List[float] = []
+    pooled_true: List[np.ndarray] = []
+    pooled_pred: List[np.ndarray] = []
+    pooled_rows: List[np.ndarray] = []
+
+    for train_rows, validation_rows in leakage_safe_folds(matrix, cfg):
+        fold = clone(estimator)
+        start = time.perf_counter()
+        fold.fit(matrix.X[train_rows], matrix.y[train_rows])
+        fit_times.append(time.perf_counter() - start)
+        predicted = fold.predict(matrix.X[validation_rows])
+        truth = matrix.y[validation_rows]
+        accuracies.append(float(accuracy_score(truth, predicted)))
+        macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+        pooled_true.append(np.asarray(truth))
+        pooled_pred.append(np.asarray(predicted))
+        pooled_rows.append(np.asarray(validation_rows))
+
+    report = CrossValidationReport(
+        technique=name,
+        accuracy_folds=np.asarray(accuracies, dtype=np.float64),
+        macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
+        fit_seconds=np.asarray(fit_times, dtype=np.float64),
+    )
+    return report, _pool(name, pooled_true, pooled_pred, pooled_rows)
+
+
 def cross_validate_matrix(
     matrix: FeatureMatrix,
     config: Optional[Config] = None,
@@ -477,28 +675,22 @@ def cross_validate_matrix(
     pipeline be overridden, which :func:`~evaluate.cross_validate_technique`
     does not: E1 needs the scaler-PCA-SVM pipeline, not the plain one.
     """
-    cfg = config or get_config()
-    name = technique or matrix.technique
-    estimator = pipeline or build_pipeline(cfg)
+    return cross_validate_matrix_detailed(matrix, config, technique, pipeline)[0]
 
-    accuracies: List[float] = []
-    macro_f1s: List[float] = []
-    fit_times: List[float] = []
-    for train_rows, validation_rows in leakage_safe_folds(matrix, cfg):
-        fold = clone(estimator)
-        start = time.perf_counter()
-        fold.fit(matrix.X[train_rows], matrix.y[train_rows])
-        fit_times.append(time.perf_counter() - start)
-        predicted = fold.predict(matrix.X[validation_rows])
-        truth = matrix.y[validation_rows]
-        accuracies.append(float(accuracy_score(truth, predicted)))
-        macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
 
-    return CrossValidationReport(
-        technique=name,
-        accuracy_folds=np.asarray(accuracies, dtype=np.float64),
-        macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
-        fit_seconds=np.asarray(fit_times, dtype=np.float64),
+def _pool(
+    technique: str,
+    truths: Sequence[np.ndarray],
+    predictions: Sequence[np.ndarray],
+    rows: Sequence[np.ndarray],
+) -> OutOfFoldPredictions:
+    """Concatenate per-fold validation results into one set."""
+    empty = np.empty(0, dtype=np.int64)
+    return OutOfFoldPredictions(
+        technique=technique,
+        y_true=np.concatenate(truths) if truths else empty,
+        y_pred=np.concatenate(predictions) if predictions else empty,
+        rows=np.concatenate(rows) if rows else empty,
     )
 
 
@@ -516,12 +708,32 @@ def cross_validate_decision_fusion(
     recomputed inside each fold from that fold's training rows, so the weight a
     technique gets is never informed by the rows it is about to be scored on.
     """
+    return cross_validate_decision_fusion_detailed(
+        train_matrices, config, weights, technique
+    )[0]
+
+
+def cross_validate_decision_fusion_detailed(
+    train_matrices: Mapping[str, FeatureMatrix],
+    config: Optional[Config] = None,
+    weights: Optional[Mapping[str, float]] = None,
+    technique: str = "E3",
+) -> Tuple[CrossValidationReport, OutOfFoldPredictions]:
+    """:func:`cross_validate_decision_fusion`, also returning the predictions.
+
+    Same relationship as :func:`cross_validate_matrix_detailed` has to
+    :func:`cross_validate_matrix`: this holds the fold loop, the public
+    function discards the second value.
+    """
     cfg = config or get_config()
     names = list(train_matrices)
     reference = train_matrices[names[0]]
 
     accuracies: List[float] = []
     macro_f1s: List[float] = []
+    pooled_true: List[np.ndarray] = []
+    pooled_pred: List[np.ndarray] = []
+    pooled_rows: List[np.ndarray] = []
     for train_rows, validation_rows in leakage_safe_folds(reference, cfg):
         fold_train = {
             name: replace(
@@ -542,26 +754,36 @@ def cross_validate_decision_fusion(
         truth = reference.y[validation_rows]
         accuracies.append(float(accuracy_score(truth, predicted)))
         macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+        pooled_true.append(np.asarray(truth))
+        pooled_pred.append(np.asarray(predicted))
+        pooled_rows.append(np.asarray(validation_rows))
 
-    return CrossValidationReport(
+    report = CrossValidationReport(
         technique=technique,
         accuracy_folds=np.asarray(accuracies, dtype=np.float64),
         macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
     )
+    return report, _pool(technique, pooled_true, pooled_pred, pooled_rows)
 
 
 __all__ = [
+    "CONTROL_MASK_ATTEMPTS",
     "DecisionFusion",
     "E1_PCA_VARIANCE",
     "MIN_SUBREGION_PX",
+    "OutOfFoldPredictions",
     "TechniqueMatrices",
     "build_fusion_pipeline",
     "build_technique_matrices",
     "cross_validate_decision_fusion",
+    "cross_validate_decision_fusion_detailed",
     "cross_validate_matrix",
+    "cross_validate_matrix_detailed",
     "default_extractors",
+    "e2_block_columns",
     "fit_decision_fusion",
     "macro_f1_weights",
+    "random_control_mask",
     "stack_feature_matrices",
     "weighted_soft_vote",
 ]

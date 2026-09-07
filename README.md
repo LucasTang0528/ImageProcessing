@@ -303,7 +303,84 @@ directory, or move it to `data/primary`. Class folder names are read from
 `datasets.primary.classes`, so a dataset using different names needs either a
 `--map` at staging time or an edit to that list.
 
-### 5. T3 internal experiments
+### 5. T1 internal experiments
+
+Five questions about the dominant colour descriptor, on the same terms as the
+T3 sweeps below: 5-fold stratified cross-validation on the **training
+partition only**, one shared segmentation pass, nothing tuned towards the
+report's acceptance targets.
+
+The methodology numbers these E1.1 to E1.5, which collides with the Phase 5
+enhancement also called E1. They are unrelated: these sweep the T1 descriptor,
+that one fuses all three techniques.
+
+```bash
+python scripts/run_e1_experiments.py --per-class 25 --no-augment --tag smoke
+python scripts/run_e1_experiments.py                     # the reported run
+```
+
+| ID | Variable | Sweep | Output |
+| :-- | :-- | :-- | :-- |
+| E1.1 | Descriptor against baseline | 37-dim DCD vs a 105-dim 32-bin histogram with colour moments | `e1_1.csv` |
+| E1.2 | Number of dominant colours | `N` in {3, 4, 5, 6}, reported against dimensionality | `e1_2.csv` |
+| E1.3 | Clustering colour space | CIE L\*a\*b\*, HSV, RGB | `e1_3.csv` |
+| E1.4 | Specular exclusion | on vs off, with the share of pixels dropped | `e1_4.csv` |
+| E1.5 | Block ablation | A (28), A+B (32), A+B+C (37), A+B+C without decay share (36) | `e1_5.csv` |
+
+The E1.1 baseline lives in [`features/colour_histogram.py`](features/colour_histogram.py)
+and is **not** a fourth technique — it never enters the three-way comparison.
+It exists so that "the descriptor beats a histogram" is a measured result. Both
+arms are handed the same images, the same masks, the same colour space and the
+same specular exclusion, calling the same predicate, so the only thing that
+differs is how the surviving pixels are summarised.
+
+The fourth arm of E1.5 is an addition to the original specification.
+`T1_decay_share` reads 26.5% on a held-out Unripe apple and 0.0% on a Rotten
+one, backwards from its design: the index counts a cluster as decayed when it
+is both low in chroma and low in lightness, and a dark low-chroma green cluster
+(L\* 14.7, a\* −10.4, b\* 10.3) satisfies both, so on a green apple in shadow
+it is detecting the shadow. The arm measures the dimension's contribution; it
+does not change the thresholds, which belongs in Phase 5 on training folds
+alone.
+
+### 6. T2 internal experiments
+
+Four questions about the GLCM texture descriptor, on the same terms as the other
+two sweeps: 5-fold stratified CV on the **training partition only**, one shared
+segmentation pass, nothing tuned towards the acceptance targets.
+
+Numbered E2.1 to E2.4 by the methodology, which collides with the Phase 5
+enhancement also called E2. They are unrelated: these sweep the T2 descriptor,
+that one is blemish-aware regional weighting.
+
+```bash
+python scripts/run_e2_experiments.py --per-class 25 --no-augment --tag smoke
+python scripts/run_e2_experiments.py                     # the reported run
+```
+
+| ID | Variable | Sweep | Output |
+| :-- | :-- | :-- | :-- |
+| E2.1 | Descriptor against baseline | 40-dim GLCM vs 4 first-order intensity moments | `e2_1.csv` |
+| E2.2 | Distance set | `[1]`, `[1,2]`, `[1,2,3]`, reported against dimensionality | `e2_2.csv` |
+| E2.3 | Grey-level quantisation | 16, 32, 64 levels | `e2_3.csv` |
+| E2.4 | Angle handling | per-angle vs angle-averaged rotation-invariant | `e2_4.csv` |
+
+**This sweep is a diagnosis, not only a requirement.** T2 cross-validates at
+0.6235 against a background-only control of 0.7396 — it scores *below* a
+classifier that never sees the fruit. These four arms separate "misconfigured"
+from "unsuited to a chromatic task", and E2.1 does most of that work: if four
+first-order moments match forty Haralick statistics, the co-occurrence machinery
+is contributing nothing here and no distance, quantisation or angle choice will
+rescue it. Every table carries the control value in a column, and the runner
+says on exit whether its best arm cleared it.
+
+The E2.1 baseline lives in
+[`features/intensity_baseline.py`](features/intensity_baseline.py) and is **not**
+a fourth technique. It reads the same grey levels over the same pixels the GLCM
+pairs; the only difference is that it knows nothing about how they are arranged,
+which is exactly what the co-occurrence matrix adds.
+
+### 7. T3 internal experiments
 
 Four questions about the morphological descriptor, each answered by 5-fold
 stratified cross-validation on the **training partition only**. The test split
@@ -443,7 +520,7 @@ implementation's.
 
 ---
 
-### 6. Benchmark and rank the techniques (Phases 3–4)
+### 8. Benchmark and rank the techniques (Phases 3–4)
 
 Phase 3 scores each technique in isolation through the shared harness. Phase 4
 consumes that run and decides whether the gap between the top two is real.
@@ -480,7 +557,7 @@ needed).
 
 ---
 
-### 7. Combine the techniques (Phase 5 enhancements)
+### 9. Combine the techniques (Phase 5 enhancements)
 
 Report §3.8. Once the three techniques are benchmarked in isolation they are
 combined three ways, and **each strategy is scored on its own against the
@@ -509,13 +586,42 @@ comparison over identical folds. Outputs in `results/<tag>/`:
 | `enhancement_matrix.csv` | one row per technique and enhancement: dimensionality, CV mean ± std, per-fold accuracy, test accuracy and macro/weighted F1 |
 | `enhancement_vs_best.csv` | E1, E2, E3 each against the best individual technique — mean fold gap, paired *t*, *p*, and whether it clears the report's +3-point bar |
 | `ablation.csv` | E1 and E3 rebuilt with one technique dropped at a time, so each technique's marginal contribution to the hybrid is quantified |
+| `ablation_enhancements.csv` | E2 taken apart: each half of its split alone, and a control that keeps the split and moves it |
+| `per_class.csv` | precision, recall, F1 and support per class, for every configuration including the ablation arms |
+| `confusion/<config>.csv` | the held-out normalised confusion matrix as numbers, beside the PNG |
+| `confusion/cv/<config>.csv` | the same from pooled out-of-fold predictions — the only form an ablation arm can have |
 | `enhancement_ranking.txt` | all six ranked, with the significance verdict and both controls |
 | `E{1,2,3}_confusion.png` | normalised confusion matrix per enhancement |
 
+**Two provenances in `per_class.csv`.** T1, T2, T3, E1, E2 and E3 are fitted on
+the whole training partition and predict the held-out test split, so they have a
+real held-out breakdown. An ablation arm never does either — it is only ever
+cross-validated, which is why `ablation.csv` has no test column. Those arms are
+therefore scored on their **pooled out-of-fold validation predictions**: the
+predictions the cross-validation already made and used to throw away. Each comes
+from a model that never saw that image, and the validation side holds originals
+only, so the pool carries one prediction per source image. The `source` column
+says which of the two any row came from.
+
+**Ablating the enhancement, not only the techniques.** `ablation.csv` answers
+"which technique does the hybrid need"; `ablation_enhancements.csv` answers
+"does E2's split do anything". Dropping either half of the split is the easy
+half of that question. The arm that matters is `E2_random_mask`, which keeps all
+154 columns, keeps both sub-regions and keeps their areas, and rotates the
+blemish mask to an arbitrary part of the same fruit. E2 doubles T1 and T2's
+dimensionality by splitting, so a gain over them could be bought entirely by the
+extra columns; only a control that holds the columns fixed and varies the
+*placement* separates the two. The mask is rotated rather than replaced by
+scattered pixels on purpose — scattering would also destroy the spatial
+coherency T1's block B measures, and beating that control would show only that
+coherent regions beat speckle.
+
 E1's PCA basis, E3's per-fold sub-models and every scaler are fitted on the
 training fold alone; E3's voting weights come from CV on the training partition
-only. `enhance.py` is covered by `tests/test_enhance.py` (17 tests, no dataset
-needed); the image-level pass is exercised by the pilot run.
+only. The control mask is a function of one image's own masks plus a seed, so no
+label, fold or other image can reach it. `enhance.py` is covered by
+`tests/test_enhance.py` (36 tests, no dataset needed); the image-level pass is
+exercised by the pilot run.
 
 ---
 
@@ -561,7 +667,7 @@ Not yet implemented. Each phase is built and verified in turn.
 | 2 | The three feature extractors, with unit tests | **Complete** |
 | 3 | Individual benchmarks | Driver built (`scripts/run_benchmarks.py`); full run pending |
 | 4 | Comparison, paired t-tests, ranking | Code built (`compare.py`, `scripts/run_comparison.py`); waiting on the Phase 3 run |
-| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Pending (T3's E3.1–E3.4 done; T1/T2 pending) |
+| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Drivers built for T1 (`run_e1_experiments.py`), T2 (`run_e2_experiments.py`) and T3; full runs pending |
 | 5b | Enhancements E1/E2/E3 and the hybrid | Code built (`enhance.py`, `scripts/run_enhancements.py`); waiting on the full run |
 | 6 | Held-out generalisation and robustness sets | Pending |
 
@@ -732,6 +838,7 @@ are introduced for Otsu to mistake for fruit.
 
 ```
 config.json      every experimental parameter and path; the single source of truth
+CHOICES.md       every place the specification is silent and a decision was made
 config.py        loads and validates config.json into an immutable Config
 data.py          dataset discovery and image loading, deterministically ordered
 harness.py       preprocessing, segmentation, augmentation, partition, pipeline,
@@ -742,6 +849,8 @@ features/
   t1_dominant_colour.py  MPEG-7 dominant colour descriptor, 37 dimensions
   t2_glcm.py             GLCM texture descriptors, 40 dimensions
   t3_morphological.py    multiscale morphological descriptors, 36 dimensions
+  colour_histogram.py    the E1.1 comparator, 105 dimensions; not a fourth technique
+  intensity_baseline.py  the E2.1 comparator, 4 dimensions; not a fourth technique
 compare.py       (Phase 4) ranking, paired t-tests over the CV folds, Holm correction
 enhance.py       (Phase 5) E1 feature fusion, E2 regional weighting, E3 decision fusion
 site/            generated results site; not committed, rebuild it with build_site.py
@@ -753,20 +862,27 @@ scripts/
   run_benchmarks.py              runs every implemented technique through the harness
   run_comparison.py              (Phase 4) ranks a benchmark run and tests each pairwise gap
   run_enhancements.py            (Phase 5) builds E1/E2/E3, scores each against the best technique
+  run_e1_experiments.py          T1 internal experiments E1.1 to E1.5
+  run_e2_experiments.py          T2 internal experiments E2.1 to E2.4
   run_t3_experiments.py          T3 internal experiments E3.1 to E3.4
   annotate_blemishes.py          paints the ground-truth blemish masks E3.4 needs
   build_site.py                  turns a benchmark run into the local results site
   site_template.html             the site's markup; build_site.py copies it verbatim
 tests/
-  test_phase1_harness.py         54 tests, runnable without the dataset
+  test_phase1_harness.py         57 tests, runnable without the dataset
   test_dataset_audit.py          22 tests for the audit, its leakage metric and duplicates
   test_fetch_dataset.py          22 tests for dataset staging and class matching
   test_t1_dominant_colour.py     41 tests for T1, its ordering and its angular statistics
   test_t2_glcm.py                35 tests for T2, background exclusion and degenerate matrices
   test_t3.py                     70 tests for T3, its boundary guards and pole exclusion
-  test_compare.py                25 tests for the Phase 4 ranking, the paired t-test and Holm
-  test_enhance.py                17 tests for the soft vote, aligned fusion and the E2 sub-regions
-results/         all generated CSVs and PNGs
+  test_compare.py                28 tests for the Phase 4 ranking, the paired t-test and Holm
+  test_enhance.py                36 tests for the soft vote, aligned fusion, the E2
+                                 sub-regions and the pooled out-of-fold predictions
+  test_colour_histogram.py       23 tests for the E1.1 baseline and the pixels it shares with T1
+  test_intensity_baseline.py     16 tests for the E2.1 baseline and its four moments
+  test_experiment_runners.py     36 tests for the T1/T2 sweeps and their leakage invariants
+results/         all generated CSVs and PNGs; the CSVs, .txt and .json are tracked,
+                 the PNGs are not - see CHOICES.md section 6
 ```
 
 ## Viewing the results

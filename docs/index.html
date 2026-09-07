@@ -343,7 +343,7 @@ font-family:"IBM Plex Mono",ui-monospace,monospace}
       The specification sets these bars and says explicitly not to tune towards them. A missed
       target is reported as missed, and a target that cannot be scored says why.
     </p>
-    <div class="scroller"><table><caption>Targets come from the assignment brief. Nothing in the pipeline is tuned towards them; a missed target is reported as missed.</caption><thead><tr><th scope="col">Target</th><th scope="col">Required</th><th scope="col">Measured</th><th scope="col">Verdict</th></tr></thead><tbody><tr><th scope="row">Best individual technique</th><td>&ge; 0.80</td><td>0.9046 &nbsp;<span class="mono dim">T1</span></td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid accuracy</th><td>&ge; 0.85</td><td>0.9374 &nbsp;<span class="mono dim">E2</span></td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid gain over best individual</th><td>&ge; 3.0 pp</td><td>+3.29 pp</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid macro F1</th><td>&ge; 0.83</td><td>0.9744</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid weighted F1</th><td>&ge; 0.83</td><td>0.9744</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Claimed gains significant</th><td>p &lt; 0.05</td><td>p = 0.0039</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Per-class precision and recall</th><td>&ge; 0.80 each</td><td><span class="note">Computed by the evaluation module but not written to disk: the Phase&nbsp;5 driver saves only the confusion PNG for each enhancement.</span></td><td><span class="chip warn">Not exported</span></td></tr><tr><th scope="row">Blemish coverage MAE</th><td>&le; 10%</td><td><span class="note">No ground-truth masks painted yet, so every E3.4 arm reports NaN.</span></td><td><span class="chip warn">No data</span></td></tr><tr><th scope="row">Extraction + inference per image</th><td>&le; 5 s</td><td>15.4 ms <span class='dim'>(T3 extraction)</span></td><td><span class="chip pass">Pass</span></td></tr></tbody></table></div>
+    <div class="scroller"><table><caption>Targets come from the assignment brief. Nothing in the pipeline is tuned towards them; a missed target is reported as missed.</caption><thead><tr><th scope="col">Target</th><th scope="col">Required</th><th scope="col">Measured</th><th scope="col">Verdict</th></tr></thead><tbody><tr><th scope="row">Best individual technique</th><td>&ge; 0.80</td><td>0.9046 &nbsp;<span class="mono dim">T1</span></td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid accuracy</th><td>&ge; 0.85</td><td>0.9374 &nbsp;<span class="mono dim">E2</span></td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid gain over best individual</th><td>&ge; 3.0 pp</td><td>+3.29 pp</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid macro F1</th><td>&ge; 0.83</td><td>0.9744</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Hybrid weighted F1</th><td>&ge; 0.83</td><td>0.9744</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Claimed gains significant</th><td>p &lt; 0.05</td><td>p = 0.0039</td><td><span class="chip pass">Pass</span></td></tr><tr><th scope="row">Per-class precision and recall</th><td>&ge; 0.80 each</td><td><span class="note">Not produced yet. Re-run scripts/run_enhancements.py, which now writes per_class.csv beside the matrix.</span></td><td><span class="chip warn">No data</span></td></tr><tr><th scope="row">Blemish coverage MAE</th><td>&le; 10%</td><td><span class="note">No ground-truth masks painted yet, so every E3.4 arm reports NaN.</span></td><td><span class="chip warn">No data</span></td></tr><tr><th scope="row">Extraction + inference per image</th><td>&le; 5 s</td><td>15.4 ms <span class='dim'>(T3 extraction)</span></td><td><span class="chip pass">Pass</span></td></tr></tbody></table></div>
   </section>
 
   <section>
@@ -358,6 +358,57 @@ font-family:"IBM Plex Mono",ui-monospace,monospace}
       <span>results/phase5/ablation.csv</span></p>
     <h2>What each technique contributes to the hybrid</h2>
     <div class="scroller"><table><caption>The final column compares each pair with the corresponding three-way fusion. A positive value means the dropped technique was costing the fusion accuracy.</caption><thead><tr><th scope="col">Strategy</th><th scope="col">Kept</th><th scope="col">Dropped</th><th scope="col">CV accuracy</th><th scope="col">SD</th><th scope="col">vs full fusion</th></tr></thead><tbody><tr><th scope="row">E1 &middot; feature fusion</th><td><span class="mono">T1+T2</span></td><td><span class="mono">T3</span></td><td>0.9051</td><td>0.0084</td><td><span style="color:var(--fail)">-0.0185</span></td></tr><tr><th scope="row">E3 &middot; decision fusion</th><td><span class="mono">T1+T2</span></td><td><span class="mono">T3</span></td><td>0.9046</td><td>0.0100</td><td><span style="color:var(--fail)">-0.0069</span></td></tr><tr class="lead"><th scope="row">E1 &middot; feature fusion</th><td><span class="mono">T1+T3</span></td><td><span class="mono">T2</span></td><td>0.9326</td><td>0.0117</td><td><span style="color:var(--pass)">+0.0090</span></td></tr><tr><th scope="row">E3 &middot; decision fusion</th><td><span class="mono">T1+T3</span></td><td><span class="mono">T2</span></td><td>0.9040</td><td>0.0102</td><td><span style="color:var(--fail)">-0.0074</span></td></tr><tr><th scope="row">E1 &middot; feature fusion</th><td><span class="mono">T2+T3</span></td><td><span class="mono">T1</span></td><td>0.7195</td><td>0.0190</td><td><span style="color:var(--fail)">-0.2041</span></td></tr><tr><th scope="row">E3 &middot; decision fusion</th><td><span class="mono">T2+T3</span></td><td><span class="mono">T1</span></td><td>0.7519</td><td>0.0152</td><td><span style="color:var(--fail)">-0.1596</span></td></tr></tbody></table></div>
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">FULL run &middot; held-out and out-of-fold</span>
+      <span>results/phase5/per_class.csv</span></p>
+    <h2>Which class each configuration gets wrong</h2>
+    <p class="lede">
+      Accuracy says how often a configuration is right. This says what it is right about,
+      which on a three-class ripeness problem is usually the more useful half.
+    </p>
+    <div class="absent"><p><b>Not available.</b> This section reads <code>results/phase5/per_class.csv</code>, which has not been produced yet. Re-run scripts/run_enhancements.py; it writes this alongside the matrix.</p></div>
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">FULL run &middot; the enhancement, not the techniques</span>
+      <span>results/phase5/ablation_enhancements.csv</span></p>
+    <h2>Does E2&rsquo;s split do anything?</h2>
+    <p class="lede">
+      The ablation above removes a technique at a time. This removes the <b>strategy</b>:
+      each half of E2&rsquo;s split on its own, and a control that keeps the split intact
+      and moves it somewhere arbitrary on the same fruit.
+    </p>
+    <div class="absent"><p><b>Not available.</b> This section reads <code>results/phase5/ablation_enhancements.csv</code>, which has not been produced yet. Re-run scripts/run_enhancements.py to produce it.</p></div>
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">Full dataset &middot; 2400 images</span>
+      <span>results/e1/e1_*.csv</span></p>
+    <h2>T1 internal experiments</h2>
+    <p class="lede">
+      The five sweeps required for the dominant-colour branch, each run on the complete
+      dataset with five-fold cross-validation on the training partition only. The
+      methodology numbers them E1.1 to E1.5; they are sweeps of <b>T1</b>, and are unrelated
+      to the enhancement called E1 above, which fuses all three techniques.
+    </p>
+    <div class="absent"><p><b>Not available.</b> This section reads <code>results/e1/e1_*.csv</code>, which has not been produced yet. Run scripts/run_e1_experiments.py to produce them.</p></div>
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">Full dataset &middot; 2400 images</span>
+      <span>results/e2/e2_*.csv</span></p>
+    <h2>T2 internal experiments</h2>
+    <p class="lede">
+      The four sweeps required for the texture branch. T2 is the weakest technique in the
+      study and the only one that scores below the background-only control, so this sweep
+      is a diagnosis as well as a requirement: it establishes whether the descriptor is
+      misconfigured or unsuited to a chromatic task. Numbered E2.1 to E2.4 by the
+      methodology; these are sweeps of <b>T2</b>, unrelated to the enhancement called E2
+      above.
+    </p>
+    <div class="absent"><p><b>Not available.</b> This section reads <code>results/e2/e2_*.csv</code>, which has not been produced yet. Run scripts/run_e2_experiments.py to produce them.</p></div>
   </section>
 
   <section>
@@ -420,7 +471,7 @@ font-family:"IBM Plex Mono",ui-monospace,monospace}
   </section>
 
   <section>
-    <p class="eyebrow"><span class="src">Code review</span> <span>290 tests passing</span></p>
+    <p class="eyebrow"><span class="src">Code review</span> <span>386 tests passing</span></p>
     <h2>Defects found and fixed</h2>
     <ol class="fixes">
       <li><h3>The pipeline would have stopped working</h3><p><code>SVC(probability=True)</code> is deprecated in scikit-learn 1.9 and removed in 1.11. It never changed a prediction &mdash; <code>SVC.predict</code> takes the argmax of the decision function either way &mdash; but it fitted a redundant internal Platt model on every call. The brief names <code>CalibratedClassifierCV</code> for E3 and the code was not using it; both are now correct.</p><span class="where">harness.py &middot; build_pipeline, build_probability_pipeline</span></li><li><h3>The Phase 3 benchmark ignored T3&rsquo;s configuration</h3><p>T3 was constructed bare while T1 and T2 were built from <code>config.json</code>. Editing the config would have changed two techniques and silently left the third alone &mdash; exactly the difference between techniques that Mode A exists to exclude.</p><span class="where">scripts/run_benchmarks.py &middot; available_extractors</span></li><li><h3>E3&rsquo;s voting weights leaked across folds</h3><p>The driver computed macro-F1 weights over the whole training partition and passed them into cross-validation, so every fold was scored with weights its own validation rows had helped set. Each fold now derives its weights from its own training rows.</p><span class="where">scripts/run_enhancements.py &middot; E3 and the ablation loop</span></li><li><h3>The target verdict named the wrong row</h3><p>The ranking carries enhancements alongside techniques, and the summary read the 80% individual-technique bar against whatever topped it &mdash; printing &ldquo;best individual technique: E1&rdquo;. It now names the best technique and says so when a higher-ranked entry is out of scope.</p><span class="where">compare.py &middot; ComparisonReport.summary_text</span></li><li><h3>The winner&rsquo;s lead printed with the wrong sign</h3><p>Pairwise tests are generated in insertion order, so the top-ranked configuration is often the second name in its own comparison and its stored difference is negative. The verdict sentence read it raw and rendered &ldquo;<code>+-0.0138</code>&rdquo; with a negative t. Both are now oriented to the direction the sentence claims.</p><span class="where">compare.py &middot; ComparisonReport.summary_text</span></li><li><h3>A dead configuration key</h3><p><code>classifier.probability</code> stopped being read once the deprecation was fixed. It is load-bearing again: the calibrated pipeline fails loudly if it is disabled, rather than silently reporting decision-function values as probabilities.</p><span class="where">config.json &middot; harness.py</span></li>
@@ -436,15 +487,17 @@ font-family:"IBM Plex Mono",ui-monospace,monospace}
       Several are also where the remaining legitimate accuracy lives.
     </p>
     <ul class="todo">
-      <li><span class="tag">CLI</span><span class="what"><b>Eight commands, feature caching, resumability.</b> Ten separate scripts exist instead; nothing is cached, so every rerun re-extracts and re-segments.</span></li><li><span class="tag">Dashboard</span><span class="what"><b>Tkinter + Matplotlib viewer.</b> Not started.</span></li><li><span class="tag">T1 &middot; E1.1&ndash;E1.5</span><span class="what"><b>Five sub-experiments.</b> Histogram baseline, N = 3..6 colours, LAB vs HSV vs RGB, specular exclusion on/off, block ablation. The extractor supports every one; only the runner is missing.</span></li><li><span class="tag">T2</span><span class="what"><b>Parameter sensitivity study.</b> Distance sets, quantisation levels and the angle-averaged rotation-invariant variant. 32 levels is a default, not a measured choice.</span></li><li><span class="tag">E2</span><span class="what"><b>The learned weighting.</b> Sub-regions are concatenated and the SVM left to weight them implicitly; the brief asks for a learned weighting.</span></li><li><span class="tag">Calibration</span><span class="what"><b>Pixel-to-millimetre scale from a reference object.</b> Absent, so <code>mm_per_px</code> is pinned at 1.0 and blemish areas are in pixels.</span></li><li><span class="tag">Annotations</span><span class="what"><b>60-image stratified subset, two annotators, averaged.</b> The painting tool is built and single-annotator; no masks exist, so blemish MAE cannot be scored.</span></li><li><span class="tag">Phase 6</span><span class="what"><b>Held-out generalisation and robustness sets.</b> Fruits-360, Fresh/Rotten and FruitNet directories are empty.</span></li><li><span class="tag">Docs</span><span class="what"><b>CHOICES.md.</b> Required by the brief wherever the specification is silent.</span></li><li><span class="tag">Ablation</span><span class="what"><b>Removing each enhancement in turn.</b> Only the technique-drop half is implemented; E2 is not ablated at all.</span></li><li><span class="tag">Results</span><span class="what"><b><code>results/**</code> is gitignored.</b> No CSV reaches a teammate who clones the repository, which is why this page bakes every figure in.</span></li>
+      <li><span class="tag">CLI</span><span class="what"><b>Eight commands, feature caching, resumability.</b> Ten separate scripts exist instead; nothing is cached, so every rerun re-extracts and re-segments.</span></li><li><span class="tag">Dashboard</span><span class="what"><b>Tkinter + Matplotlib viewer.</b> Not started.</span></li><li><span class="tag">E2</span><span class="what"><b>The learned weighting.</b> Sub-regions are concatenated and the SVM left to weight them implicitly; the brief asks for a learned weighting.</span></li><li><span class="tag">Calibration</span><span class="what"><b>Pixel-to-millimetre scale from a reference object.</b> Absent, so <code>mm_per_px</code> is pinned at 1.0 and blemish areas are in pixels.</span></li><li><span class="tag">Annotations</span><span class="what"><b>60-image stratified subset, two annotators, averaged.</b> The painting tool is built and single-annotator; no masks exist, so blemish MAE cannot be scored.</span></li><li><span class="tag">Phase 6</span><span class="what"><b>Held-out generalisation and robustness sets.</b> Fruits-360, Fresh/Rotten and FruitNet directories are empty.</span></li>
     </ul>
   </section>
 
   <footer>
-    FreshSight &middot; BMDS2133 Image Processing &middot; generated 2026-09-07 10:19 UTC by
-    scripts/build_report.py from results/phase5, results/t3 and results/audit.
+    FreshSight &middot; BMDS2133 Image Processing &middot; generated 2026-09-07 19:15 UTC by
+    scripts/build_report.py from results/phase5, results/e1, results/e2,
+    results/t3 and results/audit.
     Every figure was produced by running the pipeline on real data; nothing on this page is
-    hardcoded. Rebuild after any run to refresh it.
+    hardcoded. The CSVs behind them are tracked in <span>results/</span> as well, so any
+    number here can be checked against its source. Rebuild after any run to refresh it.
   </footer>
 
 </div>

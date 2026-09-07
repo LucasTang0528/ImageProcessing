@@ -151,6 +151,46 @@ def circular_variance(angles: np.ndarray) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Specular exclusion
+# --------------------------------------------------------------------------- #
+
+def specular_selector(
+    bgr_image: np.ndarray,
+    mask: np.ndarray,
+    specular_lightness: float = 240.0,
+    specular_chroma: float = 12.0,
+) -> np.ndarray:
+    """Return a boolean image marking specular pixels inside ``mask``.
+
+    A highlight is the camera's reflection of the light source, not the
+    fruit, and it is both very bright and nearly colourless. Requiring both
+    conditions is deliberate: brightness alone would discard the lit face of a
+    pale fruit, and low chroma alone would discard shadow.
+
+    This lives at module level rather than on the extractor because E1.1
+    compares the descriptor against a colour-histogram baseline, and that
+    comparison is only about the descriptor family if both arms see the same
+    pixels. The baseline therefore calls this same predicate instead of
+    reimplementing it, so the two can never drift apart.
+
+    Args:
+        bgr_image: A ``uint8`` BGR image.
+        mask: Boolean fruit mask; pixels outside it are never marked.
+        specular_lightness: Minimum OpenCV 8-bit ``L``. The default 240 is
+            ``L* > 94`` in true CIE units.
+        specular_chroma: Maximum CIE chroma. Chroma is unscaled between the
+            two encodings, so 12 means the same in both.
+
+    Returns:
+        A boolean array of the mask's shape, True where a pixel is specular.
+    """
+    lab = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2LAB).astype(np.float64)
+    chroma = np.hypot(lab[:, :, 1] - LAB_AB_OFFSET, lab[:, :, 2] - LAB_AB_OFFSET)
+    specular = (lab[:, :, 0] > specular_lightness) & (chroma < specular_chroma)
+    return specular & mask
+
+
+# --------------------------------------------------------------------------- #
 # Canonical ordering
 # --------------------------------------------------------------------------- #
 
@@ -347,19 +387,10 @@ class DominantColourExtractor(FeatureExtractor):
         )
 
     def _specular_selector(self, bgr_image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Return a boolean image marking specular pixels inside the mask.
-
-        A highlight is the camera's reflection of the light source, not the
-        fruit, and it is both very bright and nearly colourless. Requiring
-        both conditions is deliberate: brightness alone would discard the lit
-        face of a pale fruit, and low chroma alone would discard shadow.
-        """
-        lab = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2LAB).astype(np.float64)
-        chroma = np.hypot(
-            lab[:, :, 1] - LAB_AB_OFFSET, lab[:, :, 2] - LAB_AB_OFFSET
+        """Return a boolean image marking specular pixels inside the mask."""
+        return specular_selector(
+            bgr_image, mask, self.specular_lightness, self.specular_chroma
         )
-        specular = (lab[:, :, 0] > self.specular_lightness) & (chroma < self.specular_chroma)
-        return specular & mask
 
     # ----------------------------------------------------------------- #
     # Extraction

@@ -1,0 +1,4 @@
+class,background_only_recall
+Unripe,0.925
+Ripe,0.45625
+Rotten,0.8375
