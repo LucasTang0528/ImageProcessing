@@ -46,7 +46,7 @@ body {
   font-family:var(--sans); font-size:15px; line-height:1.55;
   -webkit-font-smoothing:antialiased;
 }
-.wrap { max-width:1120px; margin:0 auto; padding:0 28px 72px; }
+.wrap { max-width:1200px; margin:0 auto; padding:0 28px 72px; }
 
 /* ---------- header ---------- */
 header {
@@ -147,18 +147,18 @@ button.thumb {
   padding:0; border:2px solid var(--rule); border-radius:5px; cursor:pointer;
   background:none; line-height:0; overflow:hidden; transition:.12s;
 }
-button.thumb img { width:52px; height:52px; object-fit:cover; display:block; }
+button.thumb img { width:62px; height:62px; object-fit:cover; display:block; }
 button.thumb:hover { border-color:var(--rule-strong); }
 button.thumb[aria-pressed="true"] { border-color:var(--bar-fill); }
 button.thumb:focus-visible { outline:2px solid var(--bar-fill); outline-offset:2px; }
 
 /* ---------- result panel ---------- */
 .panel {
-  display:grid; gap:24px; grid-template-columns:minmax(280px,1fr) minmax(300px,1.15fr);
+  display:grid; gap:26px; grid-template-columns:minmax(340px,1.25fr) minmax(290px,1fr);
   background:var(--card); border:1px solid var(--rule); border-radius:6px;
   padding:22px; box-shadow:var(--shadow);
 }
-.shots { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.shots { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
 .shot img {
   width:100%; border-radius:4px; display:block;
   border:1px solid var(--rule); background:var(--sunk);
@@ -172,6 +172,7 @@ button.thumb:focus-visible { outline:2px solid var(--bar-fill); outline-offset:2
   margin-top:12px; word-break:break-all;
 }
 
+.shotnote { font-size:11.5px; color:var(--faint); margin:8px 0 0; line-height:1.5; }
 .verdict {
   display:flex; align-items:center; gap:10px; flex-wrap:wrap;
   padding:12px 14px; border-radius:5px; margin-bottom:18px;
@@ -291,15 +292,16 @@ table.cm td.diag { font-weight:600; }
     <div>
       <div class="shots">
         <div class="shot">
-          <img id="shot-original" alt="Preprocessed apple">
-          <p class="caption">Preprocessed</p>
+          <img id="shot-original" alt="Source photograph">
+          <p class="caption">Source image</p>
         </div>
         <div class="shot">
           <img id="shot-seg" alt="Segmentation boundary">
-          <p class="caption">Segmented</p>
+          <p class="caption">Segmentation</p>
         </div>
       </div>
       <p class="filename" id="filename"></p>
+      <p class="shotnote">Shown at 512 px from the source photograph. The descriptors themselves read a 224&times;224 copy that has been Gaussian blurred and CLAHE equalised; the outline is the mask measured on that copy, scaled up.</p>
     </div>
     <div>
       <div class="verdict" id="verdict"></div>
@@ -334,6 +336,27 @@ table.cm td.diag { font-weight:600; }
 <script>
 (function () {
   "use strict";
+
+  // data.js sits beside the built page in site/, never beside this template.
+  // Opening scripts/site_template.html directly - with Live Server or
+  // otherwise - therefore loads no data, and every control would render empty
+  // with only a console error to explain it. Say so on the page instead.
+  if (!window.FRESHSIGHT) {
+    document.querySelector(".wrap").innerHTML =
+      '<div style="max-width:60ch;margin:80px auto;font-family:system-ui,sans-serif">' +
+      '<h1 style="font-size:22px;margin:0 0 12px">No data loaded</h1>' +
+      '<p style="color:#6C7166;line-height:1.6">This is the page template, not the built ' +
+      'page. It has no <code>data.js</code> beside it, so there are no results to show.</p>' +
+      '<p style="color:#6C7166;line-height:1.6">Open <b>site/index.html</b> instead &mdash; ' +
+      'that is the generated page, and it has its data next to it.</p>' +
+      '<pre style="background:#EFEEE6;padding:12px 14px;border-radius:5px;font-size:12.5px;' +
+      'overflow-x:auto">python scripts/build_site.py --tag pilot3
+' +
+      'python -m http.server 8000 --directory site</pre>' +
+      '<p style="color:#969B8C;font-size:13px">Then open http://localhost:8000</p></div>';
+    return;
+  }
+
   var D = window.FRESHSIGHT;
   var CHANCE = 1 / D.classes.length;
   var state = { cls: D.classes[0], tech: null, index: 0 };
@@ -456,7 +479,9 @@ table.cm td.diag { font-weight:600; }
       }));
     });
     techBox.innerHTML = "";
-    ranked.forEach(function (t) {
+    // Listed T1, T2, T3 rather than by rank: the selector is a way of naming a
+    // technique, not a second scoreboard. The ranking above is the scoreboard.
+    D.techniques.forEach(function (t) {
       techBox.appendChild(chip(D.labels[t], t, t === state.tech, function () {
         state.tech = t; renderControls(); renderPanel();
       }));

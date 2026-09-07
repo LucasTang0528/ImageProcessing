@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from config import Config, get_config  # noqa: E402
-from data import ImageRecord, load_primary  # noqa: E402
+from data import ImageRecord, load_primary, read_image  # noqa: E402
 from harness import (  # noqa: E402
     build_feature_matrix,
     build_probability_pipeline,
@@ -135,19 +135,43 @@ def resolve_feature(names: Sequence[str], values: np.ndarray, spec: str) -> floa
     return float(values[index])
 
 
+#: Side length the gallery renders at. The pipeline works on 224x224, but a
+#: 224px JPEG is a poor thing to look at, so the display copy is rendered from
+#: the source image at this size and the mask is scaled up to match it. The
+#: geometry is identical because the harness resizes to a square too; only the
+#: viewing resolution differs.
+DISPLAY_SIZE = 512
+
+
+def display_image(record: ImageRecord) -> np.ndarray:
+    """Render one record for display: the source image, square, unblurred.
+
+    This deliberately skips the Gaussian blur and CLAHE that
+    :func:`harness.preprocess` applies. Those exist to help the descriptors,
+    not the reader, and showing their output makes every picture look soft and
+    washed out. The resize matches the harness so the mask still lines up.
+    """
+    return cv2.resize(
+        read_image(record.path), (DISPLAY_SIZE, DISPLAY_SIZE), interpolation=cv2.INTER_AREA
+    )
+
+
 def contour_overlay(image_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Draw the segmentation boundary over a dimmed copy of the image."""
+    if mask.shape[:2] != image_bgr.shape[:2]:
+        mask = cv2.resize(mask, image_bgr.shape[1::-1], interpolation=cv2.INTER_NEAREST)
     dimmed = image_bgr.copy()
     outside = mask == 0
-    dimmed[outside] = (dimmed[outside] * 0.28).astype(np.uint8)
+    dimmed[outside] = (dimmed[outside] * 0.30).astype(np.uint8)
     contours, _ = cv2.findContours(
         (mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    cv2.drawContours(dimmed, contours, -1, (90, 220, 120), 2)
+    thickness = max(2, round(image_bgr.shape[0] / 200))
+    cv2.drawContours(dimmed, contours, -1, (90, 220, 120), thickness)
     return dimmed
 
 
-def write_jpeg(image_bgr: np.ndarray, path: Path, quality: int = 88) -> None:
+def write_jpeg(image_bgr: np.ndarray, path: Path, quality: int = 94) -> None:
     """Write a BGR image, creating the parent directory if needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     ok, buffer = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
@@ -160,9 +184,18 @@ def choose_gallery(
     records: Sequence[ImageRecord],
     per_class: int,
     config: Config,
+    draw: int = 1,
 ) -> List[ImageRecord]:
-    """Pick a reproducible spread of test images from each class."""
-    rng = np.random.default_rng(config.seed + 1)
+    """Pick a reproducible spread of test images from each class.
+
+    ``draw`` selects which sample is taken. It exists so that a different set
+    of pictures can be offered without editing code, and every value gives the
+    same pictures on every machine. It is not a quality filter: the draw is
+    uniform over the test split, so a leaky mask is as likely to be shown as a
+    clean one. Re-drawing until the pictures flatter the pipeline would make
+    the gallery evidence of nothing.
+    """
+    rng = np.random.default_rng(config.seed + draw)
     chosen: List[ImageRecord] = []
     for name in CLASS_ORDER:
         pool = [r for r in records if r.display_name == name]
@@ -248,6 +281,7 @@ def build_payload(
     config: Config,
     results_dir: Path,
     gallery_size: int,
+    draw: int = 1,
 ) -> dict:
     """Fit every technique, predict the gallery, and assemble the page data."""
     metadata = json.loads((results_dir / "run_metadata.json").read_text(encoding="utf-8"))
@@ -264,7 +298,7 @@ def build_payload(
     techniques = [t for t in metadata["techniques"] if t in extractors]
     metrics = load_run_metrics(results_dir, techniques)
 
-    gallery_records = choose_gallery(partition.test, gallery_size, config)
+    gallery_records = choose_gallery(partition.test, gallery_size, config, draw)
     gallery_paths = {str(r.path) for r in gallery_records}
 
     print(f"  fitting {len(techniques)} technique(s) on {len(partition.train)} training images")
@@ -327,7 +361,7 @@ def build_payload(
         if any(v is None for v in entry["by_technique"].values()):
             continue  # Segmentation failed for this image under some technique.
         gallery[record.display_name].append(entry)
-        entry["_render"] = (sample.image, sample.mask, original, overlay)
+        entry["_render"] = (display_image(record), sample.mask, original, overlay)
 
     ranked = sorted(techniques, key=lambda t: metrics[t]["macro_f1"], reverse=True)
     ttest = None
@@ -377,6 +411,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tag", default="pilot3", help="results/<tag> to read.")
     parser.add_argument("--gallery", type=int, default=8, help="Pictures offered per class.")
+    parser.add_argument("--draw", type=int, default=1,
+                        help="Which reproducible sample of test pictures to offer.")
     parser.add_argument("--out", default="site", help="Directory to write the site into.")
     args = parser.parse_args(argv)
 
@@ -391,7 +427,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Building site from results/{args.tag}")
     print("=" * 74)
 
-    payload = build_payload(config, results_dir, args.gallery)
+    payload = build_payload(config, results_dir, args.gallery, args.draw)
 
     out = PROJECT_ROOT / args.out
     out.mkdir(parents=True, exist_ok=True)
