@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import cv2  # noqa: E402
 import pytest  # noqa: E402
+from sklearn.calibration import CalibratedClassifierCV  # noqa: E402
 
 from config import get_config  # noqa: E402
 from data import (  # noqa: E402
@@ -49,6 +50,7 @@ from harness import (  # noqa: E402
     build_augmentation_plan,
     build_feature_matrix,
     build_pipeline,
+    build_probability_pipeline,
     leakage_safe_folds,
     make_cv,
     prepare_sample,
@@ -560,6 +562,46 @@ def test_pipeline_scales_inside_the_pipeline():
     svc = pipeline.named_steps["svc"]
     assert svc.kernel == "rbf" and svc.C == 1.0 and svc.gamma == "scale"
     assert svc.random_state == CONFIG.seed
+
+
+def test_the_scored_pipeline_does_not_fit_a_redundant_platt_model():
+    """``SVC(probability=True)`` is removed in scikit-learn 1.11.
+
+    It also never changed a prediction - ``SVC.predict`` is the argmax of the
+    decision function whether or not it is set - so every technique's score is
+    unchanged by its absence, and the calibrated estimator the brief actually
+    asks for lives in :func:`build_probability_pipeline`.
+    """
+    svc = build_pipeline(CONFIG).named_steps["svc"]
+    # Unset, scikit-learn 1.9 leaves the attribute at its "deprecated"
+    # sentinel rather than at False, so the assertion is that it was never
+    # turned on, not that it reads as False.
+    assert svc.probability is not True
+
+
+def test_the_probability_pipeline_calibrates_the_same_svc():
+    pipeline = build_probability_pipeline(CONFIG)
+    assert [name for name, _ in pipeline.steps] == ["scaler", "svc"]
+    calibrated = pipeline.named_steps["svc"]
+    assert isinstance(calibrated, CalibratedClassifierCV)
+    assert calibrated.cv == CONFIG.partition.cv_folds
+    assert calibrated.ensemble is False
+
+    inner = calibrated.estimator
+    assert inner.kernel == CONFIG.classifier.kernel
+    assert inner.C == CONFIG.classifier.C
+    assert inner.gamma == CONFIG.classifier.gamma
+    assert inner.random_state == CONFIG.seed
+
+
+def test_the_probability_pipeline_emits_a_distribution_per_row():
+    rng = np.random.default_rng(CONFIG.seed)
+    X = np.vstack([rng.normal(0.0, 1.0, (40, 4)), rng.normal(3.0, 1.0, (40, 4))])
+    y = np.array([0] * 40 + [1] * 40)
+
+    proba = build_probability_pipeline(CONFIG).fit(X, y).predict_proba(X)
+    assert proba.shape == (80, 2)
+    assert np.allclose(proba.sum(axis=1), 1.0)
 
 
 # --------------------------------------------------------------------------- #

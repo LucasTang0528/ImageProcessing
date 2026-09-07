@@ -17,10 +17,12 @@ E2    Blemish-aware regional weighting. The T3 blemish mask splits the fruit
       each sub-region separately and concatenated, so a localised defect
       signal is no longer averaged away across the whole peel. This is the
       study's principal novel contribution (Problem 3, Gap 4).
-E3    Weighted decision-level fusion. One SVM per technique produces calibrated
-      class probabilities; these are combined by weighted soft voting, the
-      weight of each technique being its cross-validated macro F1 (Kittler et
-      al., 1998).
+E3    Weighted decision-level fusion. One SVM per technique, wrapped in
+      ``CalibratedClassifierCV``, produces calibrated class probabilities;
+      these are combined by weighted soft voting, the weight of each technique
+      being its cross-validated macro F1 (Kittler et al., 1998). Under
+      cross-validation the weights are recomputed inside each fold, so no fold
+      is scored with a weight its own validation rows helped set.
 ====  ======================================================================
 
 Nothing here changes the shared harness, the partition, the folds or the
@@ -62,6 +64,7 @@ from harness import (
     FeatureMatrix,
     SegmentationFailure,
     build_pipeline,
+    build_probability_pipeline,
     collect_failures,
     iter_prepared,
     leakage_safe_folds,
@@ -351,7 +354,6 @@ def build_fusion_pipeline(
                     kernel=clf.kernel,
                     C=clf.C,
                     gamma=clf.gamma,
-                    probability=clf.probability,
                     random_state=cfg.seed,
                 ),
             ),
@@ -439,6 +441,11 @@ def fit_decision_fusion(
         weights: Optional explicit weights. When omitted they are the
             cross-validated macro F1 of each technique.
 
+    Each sub-model is the calibrated form of the shared pipeline. Soft voting
+    only means anything if the three probability vectors are on a common
+    scale, and an uncalibrated SVM decision function is not a probability, so
+    the brief specifies ``CalibratedClassifierCV`` here and nowhere else.
+
     Returns:
         A fitted :class:`DecisionFusion`.
     """
@@ -447,7 +454,7 @@ def fit_decision_fusion(
 
     pipelines: Dict[str, Pipeline] = {}
     for name, matrix in train_matrices.items():
-        pipeline = build_pipeline(cfg)
+        pipeline = build_probability_pipeline(cfg)
         pipeline.fit(matrix.X, matrix.y)
         pipelines[name] = pipeline
 

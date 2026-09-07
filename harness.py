@@ -29,6 +29,7 @@ from typing import Callable, Iterator, List, Optional, Protocol, Sequence, Tuple
 
 import cv2
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -692,6 +693,13 @@ def build_pipeline(config: Optional[Config] = None) -> Pipeline:
     the scaler is fitted on each training fold alone and never sees the
     validation fold or the test partition.
 
+    ``SVC`` is built without ``probability=True``. That flag never changed a
+    prediction - ``SVC.predict`` takes the argmax of the decision function
+    either way - it only fitted an extra internal Platt model on every call.
+    scikit-learn deprecated it in 1.9 and removes it in 1.11, and the brief
+    asks for calibrated probabilities in exactly one place, the E3 decision
+    fusion, which uses :func:`build_probability_pipeline` instead.
+
     Returns:
         An unfitted pipeline of ``StandardScaler`` then ``SVC``.
     """
@@ -706,8 +714,61 @@ def build_pipeline(config: Optional[Config] = None) -> Pipeline:
                     kernel=clf.kernel,
                     C=clf.C,
                     gamma=clf.gamma,
-                    probability=clf.probability,
                     random_state=cfg.seed,
+                ),
+            ),
+        ]
+    )
+
+
+def build_probability_pipeline(config: Optional[Config] = None) -> Pipeline:
+    """Build the shared pipeline in its calibrated, probability-emitting form.
+
+    Same scaler and the same ``SVC`` hyperparameters as :func:`build_pipeline`,
+    wrapped in :class:`~sklearn.calibration.CalibratedClassifierCV` so that
+    ``predict_proba`` returns calibrated posteriors. The brief names this
+    estimator for the E3 weighted decision-level fusion, and it is also what
+    scikit-learn 1.9 directs ``SVC(probability=True)`` callers to.
+
+    ``ensemble=False`` fits the sigmoid on out-of-fold decision values and then
+    refits the ``SVC`` once on all the data handed in, so the calibrated model
+    is the same single ``SVC`` the rest of the study uses rather than an
+    average of five. Calibration therefore sees only the rows the pipeline is
+    fitted on, which under :func:`leakage_safe_folds` is the training fold
+    alone.
+
+    Returns:
+        An unfitted pipeline of ``StandardScaler`` then a calibrated ``SVC``.
+
+    Raises:
+        ValueError: If ``classifier.probability`` is disabled in the config.
+            E3 and the dashboard cannot fall back to an uncalibrated decision
+            function without silently reporting numbers that are not
+            probabilities, so the switch fails loudly instead.
+    """
+    cfg = config or get_config()
+    clf = cfg.classifier
+    if not clf.probability:
+        raise ValueError(
+            "classifier.probability is false, but the E3 decision fusion and "
+            "the dashboard both need calibrated class probabilities. Set it to "
+            "true in config.json, or do not call this pipeline."
+        )
+    return Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "svc",
+                CalibratedClassifierCV(
+                    SVC(
+                        kernel=clf.kernel,
+                        C=clf.C,
+                        gamma=clf.gamma,
+                        random_state=cfg.seed,
+                    ),
+                    method="sigmoid",
+                    cv=cfg.partition.cv_folds,
+                    ensemble=False,
                 ),
             ),
         ]

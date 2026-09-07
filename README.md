@@ -613,9 +613,19 @@ read -> (augment, training only) -> preprocess -> segment -> extract features
 **Classifier** ([`harness.build_pipeline`](harness.py))
 
 13. `Pipeline([StandardScaler(), SVC(kernel='rbf', C=1.0, gamma='scale',
-    probability=True, random_state=42)])`. The scaler lives inside the
-    pipeline, so under cross-validation it is fitted on each training fold
-    alone and never sees a validation fold or the test partition.
+    random_state=42)])`. The scaler lives inside the pipeline, so under
+    cross-validation it is fitted on each training fold alone and never sees a
+    validation fold or the test partition.
+
+14. [`harness.build_probability_pipeline`](harness.py) is the same estimator
+    wrapped in `CalibratedClassifierCV(..., method='sigmoid', cv=5,
+    ensemble=False)`. Only E3's soft vote and the results site use it: soft
+    voting needs the three techniques' outputs on a common probability scale,
+    and an SVM decision function is not one. `SVC(probability=True)` is not
+    used anywhere — it never changed a prediction (`SVC.predict` is the argmax
+    of the decision function either way), it fitted a redundant internal Platt
+    model on every call, and scikit-learn 1.9 deprecates it for removal in
+    1.11.
 
 ---
 

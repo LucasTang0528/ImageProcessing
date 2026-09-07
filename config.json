@@ -69,6 +69,7 @@
   },
 
   "classifier": {
+    "_comment": "Shared SVM, identical for every technique and enhancement. 'probability' does not change any prediction: it enables the calibrated form of the pipeline (CalibratedClassifierCV around the same SVC), which only E3's soft vote and the results site need. The plain pipeline every technique is scored through is an uncalibrated SVC.",
     "kernel": "rbf",
     "C": 1.0,
     "gamma": "scale",

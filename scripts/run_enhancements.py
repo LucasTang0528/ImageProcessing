@@ -176,8 +176,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"    E2: CV {cv_e2.mean_accuracy:.4f}  test {e2_report.accuracy:.4f}")
 
     # ---- E3 weighted decision-level fusion ------------------------- #
+    # The cross-validation deliberately does NOT receive these weights. They
+    # are the cross-validated macro F1 over the whole training partition, so
+    # every fold's validation rows helped set them; scoring a fold with them
+    # would let each fold be judged partly on its own answers. Passing None
+    # makes each fold derive its weights from its own training rows alone.
+    # The weights below are fitted on the full training partition and used for
+    # the held-out test prediction, which is legitimate - the test rows played
+    # no part in them.
+    cv_e3 = cross_validate_decision_fusion(train.individual, config)
     weights = macro_f1_weights(train.individual, config)
-    cv_e3 = cross_validate_decision_fusion(train.individual, config, weights=weights)
     fusion = fit_decision_fusion(train.individual, config, weights=weights)
     e3_pred = fusion.predict({name: test[name] for name in ("T1", "T2", "T3")})
     e3_report = classification_metrics(test["T1"].y, e3_pred, display, technique="E3")
@@ -226,8 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cv_mean_accuracy": cv_pair.mean_accuracy, "cv_std_accuracy": cv_pair.std_accuracy,
         })
         sub = {p: train[p] for p in pair}
-        w = macro_f1_weights(sub, config)
-        cv_dec = cross_validate_decision_fusion(sub, config, weights=w, technique="+".join(pair))
+        cv_dec = cross_validate_decision_fusion(sub, config, technique="+".join(pair))
         ablation_rows.append({
             "strategy": "E3_decision_fusion", "techniques": "+".join(pair),
             "dropped": (set(("T1", "T2", "T3")) - set(pair)).pop(),

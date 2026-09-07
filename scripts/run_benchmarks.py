@@ -64,8 +64,11 @@ from harness import (  # noqa: E402
 def available_extractors(config: Config) -> Dict[str, object]:
     """Return every technique that is currently implemented.
 
-    T3 is absent from this mapping while it remains unmerged. Listing it here
-    before it exists would produce a comparison with a silent hole in it.
+    All three are built from ``config.json`` and nothing else, so the run is
+    reproducible from the config file alone. T3 is discovered rather than
+    imported at module scope: it is absent from this mapping while it remains
+    unmerged, and listing it before it exists would produce a comparison with a
+    silent hole in it.
     """
     extractors: Dict[str, object] = {
         "T1": DominantColourExtractor.from_config(config),
@@ -74,9 +77,12 @@ def available_extractors(config: Config) -> Dict[str, object]:
     try:
         from features.t3_morphological import T3MorphologicalExtractor  # noqa: WPS433
 
-        # T3 carries its own parameter defaults inside the module rather than
-        # reading config.json, so there is nothing to hand it here.
-        extractors["T3"] = T3MorphologicalExtractor()
+        # Built from the ``t3_morphological`` block of config.json, exactly as
+        # T1 and T2 are built from theirs. Constructing it bare would silently
+        # fall back to the module defaults, so an edit to config.json would
+        # change T1 and T2 and leave T3 alone - a difference between techniques
+        # that no output would report.
+        extractors["T3"] = T3MorphologicalExtractor.from_config(config)
     except ImportError:
         pass
     return extractors

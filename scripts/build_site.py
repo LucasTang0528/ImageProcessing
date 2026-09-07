@@ -41,7 +41,7 @@ from config import Config, get_config  # noqa: E402
 from data import ImageRecord, load_primary  # noqa: E402
 from harness import (  # noqa: E402
     build_feature_matrix,
-    build_pipeline,
+    build_probability_pipeline,
     prepare_sample,
     set_global_seed,
     stratified_split,
@@ -275,7 +275,10 @@ def build_payload(
         train = build_feature_matrix(
             partition.train, extractor, augment=augment, config=config
         )
-        pipeline = build_pipeline(config)
+        # The site shows a per-class confidence next to each prediction, so it
+        # needs the calibrated form of the shared pipeline rather than the
+        # plain one; the hyperparameters are identical either way.
+        pipeline = build_probability_pipeline(config)
         pipeline.fit(train.X, train.y)
         print(" test ...", end="", flush=True)
         test = build_feature_matrix(partition.test, extractor, augment=False, config=config)
