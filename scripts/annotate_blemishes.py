@@ -83,10 +83,11 @@ ANNOTATION_ROOT = PROJECT_ROOT / "results" / "annotations"
 INDEX_NAME = "index.csv"
 SUBSET_NAME = "subset.csv"
 REFERENCE_DIR = "reference"
+REFERENCE_UNION_DIR = "reference_union"
 
 #: Directory names that hold merged or derived output rather than one
 #: annotator's work, and so must never be treated as an annotator.
-RESERVED_DIRS = frozenset({REFERENCE_DIR})
+RESERVED_DIRS = frozenset({REFERENCE_DIR, REFERENCE_UNION_DIR})
 
 WINDOW = "FreshSight - paint blemishes"
 BRUSH_MIN, BRUSH_MAX = 1, 30
@@ -351,14 +352,19 @@ def merge_annotations(
 ) -> pd.DataFrame:
     """Write consensus reference masks and report inter-annotator agreement.
 
-    A pixel enters the reference only where **every** annotator marked it.
-    Intersection rather than union is the conservative choice: it yields the
-    blemish extent nobody disputes, so the reference ratio is a lower bound
-    and the pipeline is never charged for a pixel one annotator called peel.
+    Two references are written, and together they bracket the truth.
 
-    Agreement is reported alongside, because an MAE measured against masks the
-    annotators themselves disagree about cannot be read without knowing how
-    much they disagreed.
+    ``reference/`` keeps a pixel only where **every** annotator marked it: the
+    blemish extent nobody disputes, so its ratio is a lower bound and the
+    pipeline is never charged for a pixel one annotator called peel.
+    ``reference_union/`` keeps a pixel any annotator marked, an upper bound.
+
+    Scoring against one alone reports a point estimate whose error is
+    indistinguishable from annotator disagreement. Scoring against both gives
+    E3.4 an interval, and where that interval is wide the honest reading is
+    that the annotation, not the detector, is the limiting factor.
+
+    Agreement is reported alongside for the same reason.
     """
     if len(annotators) < 2:
         raise SystemExit(
@@ -367,7 +373,9 @@ def merge_annotations(
         )
 
     reference_dir = root / REFERENCE_DIR
+    union_dir = root / REFERENCE_UNION_DIR
     reference_dir.mkdir(parents=True, exist_ok=True)
+    union_dir.mkdir(parents=True, exist_ok=True)
     rows: List[dict] = []
 
     for row in frame.itertuples():
@@ -381,6 +389,7 @@ def merge_annotations(
                     "n_annotators": len(present),
                     "jaccard": float("nan"),
                     "reference_px": 0,
+                    "union_px": 0,
                     "status": "incomplete",
                 }
             )
@@ -393,8 +402,11 @@ def merge_annotations(
             )
 
         consensus = np.logical_and.reduce(list(present.values()))
+        union = np.logical_or.reduce(list(present.values()))
         cv2.imwrite(str(reference_dir / f"{row.image_id}.png"),
                     (consensus * 255).astype(np.uint8))
+        cv2.imwrite(str(union_dir / f"{row.image_id}.png"),
+                    (union * 255).astype(np.uint8))
 
         pairs = [
             jaccard(present[a], present[b])
@@ -408,6 +420,7 @@ def merge_annotations(
                 "n_annotators": len(present),
                 "jaccard": float(np.mean(pairs)),
                 "reference_px": int(np.count_nonzero(consensus)),
+                "union_px": int(np.count_nonzero(union)),
                 "status": "merged",
             }
         )
@@ -434,9 +447,11 @@ def rebuild_index(
         painted = _read_mask(reference_dir / f"{image_id}.png")
         if painted is None:
             continue
+        union = _read_mask(root / REFERENCE_UNION_DIR / f"{image_id}.png")
         sample = prepare_sample(record, config=config, record_index=index)
         fruit_px = max(int(np.count_nonzero(sample.mask)), 1)
         blemish_px = int(np.count_nonzero(painted))
+        union_px = int(np.count_nonzero(union)) if union is not None else blemish_px
         rows.append(
             {
                 "image_id": image_id,
@@ -447,6 +462,8 @@ def rebuild_index(
                 "fruit_px": fruit_px,
                 "blemish_px": blemish_px,
                 "blemish_ratio_pct": 100.0 * blemish_px / fruit_px,
+                "union_px": union_px,
+                "blemish_ratio_union_pct": 100.0 * union_px / fruit_px,
             }
         )
     return pd.DataFrame(rows)

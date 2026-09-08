@@ -42,3 +42,23 @@ def test_reference_mask_is_the_intersection_not_the_union():
     assert consensus.sum() == 9  # the 3x3 overlap
     assert consensus.sum() < first.sum() and consensus.sum() < second.sum()
     assert jaccard(first, second) == pytest.approx(9 / (36 + 49 - 9))
+
+
+def test_union_reference_brackets_the_consensus_reference():
+    """The two references bound the truth from either side.
+
+    Scoring against the consensus alone reports a point estimate whose error
+    cannot be told apart from annotator disagreement. The union gives E3.4 the
+    other end of the interval.
+    """
+    first = np.zeros((10, 10), dtype=bool)
+    first[:6, :6] = True
+    second = np.zeros((10, 10), dtype=bool)
+    second[3:, 3:] = True
+
+    consensus = np.logical_and.reduce([first, second])
+    union = np.logical_or.reduce([first, second])
+
+    assert consensus.sum() <= first.sum() <= union.sum()
+    assert consensus.sum() <= second.sum() <= union.sum()
+    assert consensus.sum() == 9 and union.sum() == 76
