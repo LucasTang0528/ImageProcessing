@@ -1,0 +1,2 @@
+arm,config_key,dropped_feature,selected_by,dimensionality,highest_accuracy_arm,highest_accuracy_cv,winner_cv_accuracy,arms_tied_with_leader,arms_compared,arms_scored_on_test,test_accuracy,test_macro_f1,test_rows,role
+n_colours_3,n_colours_3,,parsimony,29,specular_off,0.8865184623805312,0.8727450072277658,15,17,1,0.8974358974358975,0.8985051078507418,468,final confirmation; selection was done on CV with the tie band

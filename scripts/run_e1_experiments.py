@@ -75,6 +75,7 @@ from evaluate import (  # noqa: E402
 )
 from features.base import FeatureExtractionError  # noqa: E402
 from selection import (  # noqa: E402
+    STRING_COLUMNS,
     add_paired_differences,
     criterion_agreement,
     report_criterion_agreement,
@@ -697,6 +698,24 @@ def e1_6_sample_sensitivity(
     return pd.DataFrame(rows)
 
 
+def normalise_string_columns(table: pd.DataFrame) -> pd.DataFrame:
+    """Return ``table`` with its text columns as strings, absences as ``""``.
+
+    Only some sub-experiments emit ``blocks``, ``config_key`` and
+    ``dropped_feature``, so concatenating their tables fills the gaps with NaN
+    - and ``str(nan)`` is the truthy string ``"nan"``. Left as it comes, a
+    winner drawn from a table that never declared a block selection reads as
+    one that did, and the closing evaluation rebuilds it against a column set
+    the sweep never scored. Same normalisation, and the same reason, as
+    ``selection.STRING_COLUMNS`` applies on a CSV round-trip.
+    """
+    out = table.copy()
+    for column in STRING_COLUMNS:
+        if column in out.columns:
+            out[column] = out[column].fillna("").astype(str)
+    return out
+
+
 def evaluate_winner(
     tables: Dict[str, pd.DataFrame],
     matrices: Dict[str, FeatureMatrix],
@@ -717,6 +736,7 @@ def evaluate_winner(
         pd.concat([t for t in tables.values() if "arm" in t.columns], ignore_index=True)
         .drop_duplicates(subset=["arm"]).reset_index(drop=True)
     )
+    combined = normalise_string_columns(combined)
     winner, tied, selected_by = select_winner(combined)
     leader = combined.loc[combined.cv_mean_accuracy.idxmax()]
     key = str(winner.config_key) or "baseline"

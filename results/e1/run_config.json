@@ -1,0 +1,62 @@
+{
+  "mode": "FULL",
+  "seed": 42,
+  "per_class": null,
+  "augmented": false,
+  "n_images": 2400,
+  "n_training_records": 1920,
+  "n_training_rows": 1886,
+  "n_excluded_by_segmentation": 34,
+  "n_refused_by_extraction": 0,
+  "cv_folds": 5,
+  "test_split_touched": false,
+  "dataset_root": "N:\\Degree\\IP\\Assignment\\ImageProcessing\\data\\primary",
+  "dataset_audit_verdict": "NOT SUITABLE - see README; 74.0% background-only against a 33.3% chance level. Relative comparisons between these arms are unaffected; absolute accuracies carry that ceiling.",
+  "segmentation_method": "grabcut",
+  "t1_config": {
+    "n_colours": 4,
+    "space": "LAB",
+    "exclude_specular": true,
+    "specular_lightness": 240.0,
+    "specular_chroma": 12.0,
+    "sample_size": 5000,
+    "coherency_min_fraction": 0.01,
+    "green_a_max": 0.0,
+    "decay_chroma_max": 25.0,
+    "decay_lightness_max": 45.0,
+    "decay_exclude_green": false,
+    "blocks": "ABC"
+  },
+  "dcd_variants": {
+    "baseline": {},
+    "n_colours_3": {
+      "n_colours": 3
+    },
+    "n_colours_5": {
+      "n_colours": 5
+    },
+    "n_colours_6": {
+      "n_colours": 6
+    },
+    "space_hsv": {
+      "space": "HSV"
+    },
+    "space_rgb": {
+      "space": "RGB"
+    },
+    "specular_off": {
+      "exclude_specular": false
+    },
+    "decay_green_excluded": {
+      "decay_exclude_green": true
+    }
+  },
+  "histogram_baseline": {
+    "bins": 32,
+    "space": "LAB",
+    "exclude_specular": true,
+    "dim": 105
+  },
+  "e1_5_note": "ABC_minus_decay is an addition to the original specification: T1_decay_share reads 26.5% on an Unripe exemplar and 0.0% on a Rotten one, consistent with a dark low-chroma green cluster satisfying its low-chroma-low-lightness test. The arm measures the dimension's contribution; it does not change it.",
+  "elapsed_seconds": 552.0
+}

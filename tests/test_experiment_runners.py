@@ -43,6 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import cv2  # noqa: E402
+import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 
 from config import get_config  # noqa: E402
@@ -351,3 +352,38 @@ def test_only_the_training_partition_is_ever_extracted(module: Path) -> None:
             f"{module.name} extracts the test partition inside {where!r}; only "
             f"the closing evaluation may touch it"
         )
+
+
+# --------------------------------------------------------------------------- #
+# The winner survives the concatenation intact
+# --------------------------------------------------------------------------- #
+
+def test_absent_text_columns_do_not_arrive_as_the_string_nan() -> None:
+    """A sub-experiment that declares no block selection must read as none.
+
+    ``evaluate_winner`` concatenates tables with disjoint columns, so a column
+    only one sub-experiment emits comes back as NaN for every other arm. NaN is
+    truthy and ``str(nan)`` is ``"nan"``, so an arm that never declared a block
+    selection would be rebuilt down the block-selection path - against a column
+    set the sweep never scored. This is the guard on that.
+    """
+    blocks_table = pd.DataFrame([{"arm": "ABC_full", "config_key": "baseline",
+                                  "dimensionality": 37, "blocks": "ABC"}])
+    plain_table = pd.DataFrame([{"arm": "n_colours_3", "config_key": "n_colours_3",
+                                 "dimensionality": 29}])
+    combined = pd.concat([blocks_table, plain_table], ignore_index=True)
+    assert str(combined.loc[1, "blocks"]) == "nan", "fixture no longer reproduces the hazard"
+
+    normalised = e1.normalise_string_columns(combined)
+    row = normalised[normalised.arm == "n_colours_3"].iloc[0]
+    assert row.blocks == ""
+    assert not (str(row.blocks) or ""), "an absent block selection must be falsy"
+    assert normalised.loc[0, "blocks"] == "ABC", "a declared selection must survive"
+
+
+def test_normalising_text_columns_leaves_the_measurements_alone() -> None:
+    """Only the text columns are touched; accuracies stay numeric."""
+    table = pd.DataFrame([{"arm": "a", "cv_mean_accuracy": 0.8833, "dimensionality": 37}])
+    normalised = e1.normalise_string_columns(table)
+    assert normalised.cv_mean_accuracy.dtype.kind == "f"
+    assert normalised.loc[0, "cv_mean_accuracy"] == pytest.approx(0.8833)

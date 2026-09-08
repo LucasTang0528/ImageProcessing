@@ -1,0 +1,60 @@
+{
+  "mode": "FULL",
+  "seed": 42,
+  "per_class": null,
+  "augmented": false,
+  "n_images": 2400,
+  "n_training_records": 1920,
+  "n_training_rows": 1886,
+  "n_excluded_by_segmentation": 34,
+  "n_refused_by_extraction": 0,
+  "cv_folds": 5,
+  "test_split_touched": false,
+  "dataset_root": "N:\\Degree\\IP\\Assignment\\ImageProcessing\\data\\primary",
+  "dataset_audit_verdict": "NOT SUITABLE - see README; 74.0% background-only against a 33.3% chance level. Relative comparisons between these arms are unaffected; absolute accuracies carry that ceiling.",
+  "segmentation_method": "grabcut",
+  "t2_config": {
+    "levels": 32,
+    "distances": [
+      1,
+      2
+    ],
+    "angles_deg": [
+      0,
+      45,
+      90,
+      135
+    ],
+    "angle_averaged": false
+  },
+  "glcm_variants": {
+    "baseline": {},
+    "distances_1": {
+      "distances": [
+        1
+      ]
+    },
+    "distances_123": {
+      "distances": [
+        1,
+        2,
+        3
+      ]
+    },
+    "levels_16": {
+      "levels": 16
+    },
+    "levels_64": {
+      "levels": 64
+    },
+    "angle_averaged": {
+      "angle_averaged": true
+    }
+  },
+  "intensity_baseline_dim": 4,
+  "background_only_control": 0.7395833333333334,
+  "best_arm": "levels_64",
+  "best_arm_accuracy": 0.6076431869535317,
+  "best_arm_beats_control": false,
+  "elapsed_seconds": 20.9
+}
