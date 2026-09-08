@@ -199,6 +199,7 @@ class DominantColourExtractor(FeatureExtractor):
         green_a_max: float = 0.0,
         decay_chroma_max: float = 25.0,
         decay_lightness_max: float = 45.0,
+        decay_exclude_green: bool = False,
         blocks: str = "ABC",
         seed: int = 42,
     ) -> None:
@@ -259,6 +260,7 @@ class DominantColourExtractor(FeatureExtractor):
         self.green_a_max = float(green_a_max)
         self.decay_chroma_max = float(decay_chroma_max)
         self.decay_lightness_max = float(decay_lightness_max)
+        self.decay_exclude_green = bool(decay_exclude_green)
         self.blocks = blocks
         self.seed = int(seed)
 
@@ -634,10 +636,19 @@ class DominantColourExtractor(FeatureExtractor):
         mean_hue = circular_mean(hue, weights=shares)
 
         green = shares[a_star < self.green_a_max].sum() * 100.0
-        decayed = shares[
-            (chroma < self.decay_chroma_max)
-            & (lightness < self.decay_lightness_max)
-        ].sum() * 100.0
+
+        # The decay test is dark and weakly chromatic. Shadowed green peel
+        # satisfies both, so on unripe fruit the index counts shade as decay.
+        # Requiring the cluster also to be non-green removes that channel;
+        # real decay is brown, never green, so nothing genuine is lost. Off by
+        # default: this is an E1 arm, not a redefinition of the published
+        # descriptor, and both readings are reported.
+        decayed_clusters = (chroma < self.decay_chroma_max) & (
+            lightness < self.decay_lightness_max
+        )
+        if self.decay_exclude_green:
+            decayed_clusters &= a_star >= self.green_a_max
+        decayed = shares[decayed_clusters].sum() * 100.0
 
         return np.array(
             [weighted_a, weighted_chroma, mean_hue, float(green), float(decayed)],
@@ -668,6 +679,7 @@ class DominantColourExtractor(FeatureExtractor):
             green_a_max=float(block.get("green_a_max", 0.0)),
             decay_chroma_max=float(block.get("decay_chroma_max", 25.0)),
             decay_lightness_max=float(block.get("decay_lightness_max", 45.0)),
+            decay_exclude_green=bool(block.get("decay_exclude_green", False)),
             blocks=str(block.get("blocks", "ABC")),
             seed=int(getattr(config, "seed", 42)),
         )

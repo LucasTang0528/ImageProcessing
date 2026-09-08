@@ -88,6 +88,7 @@
     "green_a_max": 0.0,
     "decay_chroma_max": 25.0,
     "decay_lightness_max": 45.0,
+    "decay_exclude_green": false,
     "blocks": "ABC"
   },
 
