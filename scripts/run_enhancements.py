@@ -53,8 +53,10 @@ from enhance import (  # noqa: E402
 )
 from evaluate import (  # noqa: E402
     classification_metrics,
+    PER_CLASS_TARGET,
     save_confusion_matrix,
     save_dataframe,
+    save_per_class_outputs,
 )
 from harness import build_pipeline, set_global_seed, stratified_split  # noqa: E402
 
@@ -141,6 +143,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     display = list(config.primary.display_names)
     rows: List[Dict[str, object]] = []
     reports = {}
+    # Kept so that per-class metrics can be written for the cross-validated
+    # partition too. The fold confusions live on the report; discarding it
+    # here is what previously made per-class CV figures unrecoverable.
+    cv_reports = {}
 
     # ---- individual techniques ---------------------------------------- #
     for name in ("T1", "T2", "T3"):
@@ -150,6 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             test[name].y, fitted.predict(test[name].X), display, technique=name
         )
         reports[name] = report
+        cv_reports[name] = cv
         rows.append(_row(name, "individual", train[name].dim, cv, report))
         print(f"    {name}: CV {cv.mean_accuracy:.4f}  test {report.accuracy:.4f}")
 
@@ -161,6 +168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         test["E1"].y, e1_fitted.predict(test["E1"].X), display, technique="E1"
     )
     reports["E1"] = e1_report
+    cv_reports["E1"] = cv_e1
     rows.append(_row("E1", "enhancement", train["E1"].dim, cv_e1, e1_report))
     print(f"    E1: CV {cv_e1.mean_accuracy:.4f}  test {e1_report.accuracy:.4f} "
           f"(PCA kept {e1_fitted.named_steps['pca'].n_components_} components)")
@@ -172,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         test["E2"].y, e2_fitted.predict(test["E2"].X), display, technique="E2"
     )
     reports["E2"] = e2_report
+    cv_reports["E2"] = cv_e2
     rows.append(_row("E2", "enhancement", train["E2"].dim, cv_e2, e2_report))
     print(f"    E2: CV {cv_e2.mean_accuracy:.4f}  test {e2_report.accuracy:.4f}")
 
@@ -190,6 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     e3_pred = fusion.predict({name: test[name] for name in ("T1", "T2", "T3")})
     e3_report = classification_metrics(test["T1"].y, e3_pred, display, technique="E3")
     reports["E3"] = e3_report
+    cv_reports["E3"] = cv_e3
     rows.append(_row("E3", "enhancement", -1, cv_e3, e3_report))
     print(f"    E3: CV {cv_e3.mean_accuracy:.4f}  test {e3_report.accuracy:.4f}  "
           f"weights " + ", ".join(f"{k}={v:.3f}" for k, v in weights.items()))
@@ -253,7 +263,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     save_dataframe(pd.DataFrame(ablation_rows), output / "ablation.csv", index=False)
     for name in ("E1", "E2", "E3"):
         save_confusion_matrix(reports[name], output / f"{name}_confusion.png")
-    (output / "enhancement_ranking.txt").write_text(report.summary_text() + "\n", encoding="utf-8")
+    # Per-class serialisation. Everything written here was already
+    # computed above; nothing is refitted, so no published figure moves.
+    passes = save_per_class_outputs(reports, cv_reports, display, output)
+    summary = report.summary_text()
+    summary += (
+        "\n\nPER-CLASS TARGET (precision and recall >= "
+        f"{PER_CLASS_TARGET:.2f} for every class)\n"
+    )
+    summary += passes.to_string(index=False) + "\n"
+    (output / "enhancement_ranking.txt").write_text(summary, encoding="utf-8")
 
     (output / "run_metadata.json").write_text(
         json.dumps(

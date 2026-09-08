@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -144,12 +144,59 @@ class CrossValidationReport:
         accuracy_folds: One accuracy per fold, in fold order.
         macro_f1_folds: One macro F1 per fold, in fold order.
         fit_seconds: Wall-clock fit time per fold.
+        fold_confusions: ``(n_folds, n_classes, n_classes)`` raw confusion
+            matrices, true classes as rows, in fold order. Empty when the
+            caller did not collect them.
+
+    ``fold_confusions`` is additive and defaulted: every existing field keeps
+    its meaning and its value, so a report built without it scores exactly as
+    it did before. It exists because per-class precision and recall cannot be
+    recovered from a macro F1 after the fact - the per-fold predictions have
+    to be retained while the fold is being scored, or the information is gone.
     """
 
     technique: str
     accuracy_folds: np.ndarray
     macro_f1_folds: np.ndarray
     fit_seconds: np.ndarray = field(default_factory=lambda: np.array([]))
+    fold_confusions: np.ndarray = field(default_factory=lambda: np.empty((0, 0, 0)))
+
+    @property
+    def has_per_class(self) -> bool:
+        """True when per-fold confusions were collected."""
+        return bool(self.fold_confusions.size)
+
+    def per_class_frame(self, class_names: Sequence[str]) -> pd.DataFrame:
+        """Aggregate per-fold confusions into per-class precision/recall/F1.
+
+        Counts are pooled across folds before the ratios are taken, which is
+        the same micro-aggregation the fold scores already use: every
+        validation row counts once, so a small fold cannot swing the result
+        the way averaging five per-fold ratios would.
+        """
+        if not self.has_per_class:
+            return pd.DataFrame(
+                columns=["class", "precision", "recall", "f1", "support"]
+            )
+        pooled = self.fold_confusions.sum(axis=0)
+        rows = []
+        for index, name in enumerate(class_names):
+            true_positive = float(pooled[index, index])
+            predicted = float(pooled[:, index].sum())
+            actual = float(pooled[index, :].sum())
+            precision = true_positive / predicted if predicted else 0.0
+            recall = true_positive / actual if actual else 0.0
+            denominator = precision + recall
+            rows.append(
+                {
+                    "class": name,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": (2 * precision * recall / denominator) if denominator else 0.0,
+                    "support": int(actual),
+                }
+            )
+        return pd.DataFrame(rows)
 
     @property
     def mean_accuracy(self) -> float:
@@ -214,6 +261,8 @@ def cross_validate_technique(
     accuracies: List[float] = []
     macro_f1s: List[float] = []
     fit_times: List[float] = []
+    confusions: List[np.ndarray] = []
+    labels = list(range(len(cfg.primary.display_names)))
 
     for train_rows, validation_rows in leakage_safe_folds(matrix, cfg):
         estimator = clone(pipeline)
@@ -226,12 +275,14 @@ def cross_validate_technique(
         truth = matrix.y[validation_rows]
         accuracies.append(float(accuracy_score(truth, predicted)))
         macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+        confusions.append(confusion_matrix(truth, predicted, labels=labels))
 
     return CrossValidationReport(
         technique=name,
         accuracy_folds=np.asarray(accuracies, dtype=np.float64),
         macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
         fit_seconds=np.asarray(fit_times, dtype=np.float64),
+        fold_confusions=np.asarray(confusions, dtype=np.float64),
     )
 
 
@@ -371,6 +422,121 @@ def save_confusion_matrix(
     figure.savefig(output_path, dpi=150)
     plt.close(figure)
     return output_path
+
+
+#: Per-class precision and recall each have to clear this for a configuration
+#: to be judged usable class-by-class rather than only on average. Fixed
+#: before the benchmark ran; nothing is tuned towards it.
+PER_CLASS_TARGET = 0.80
+
+
+def per_class_rows(
+    config_name: str,
+    partition: str,
+    frame: pd.DataFrame,
+) -> List[Dict[str, object]]:
+    """Flatten a per-class table into long-form rows tagged by partition.
+
+    Accepts both shapes the codebase produces: ``ClassificationReport``
+    carries the class as the index, while the cross-validated table carries it
+    as a column. ``itertuples`` is deliberately avoided - ``class`` is a Python
+    keyword, so pandas silently renames the field and the lookup fails.
+    """
+    working = frame.copy()
+    if "class" not in working.columns:
+        working = working.reset_index()
+        working = working.rename(columns={working.columns[0]: "class"})
+    return [
+        {
+            "config": config_name,
+            "partition": partition,
+            "class": str(record["class"]),
+            "precision": float(record["precision"]),
+            "recall": float(record["recall"]),
+            "f1": float(record["f1"]),
+            "support": int(record["support"]),
+        }
+        for record in working.to_dict("records")
+    ]
+
+
+def collect_per_class(
+    reports: Mapping[str, ClassificationReport],
+    cv_reports: Mapping[str, CrossValidationReport],
+    class_names: Sequence[str],
+) -> pd.DataFrame:
+    """Build the long-form per-class table for every configuration.
+
+    Two partitions per configuration: ``test`` from the held-out evaluation,
+    and ``cv`` pooled over the cross-validation folds. Both are reported
+    because they answer different questions - the test row is the headline
+    figure, the cv row is the one with folds behind it - and a configuration
+    that clears the target on one and not the other is worth seeing.
+    """
+    rows: List[Dict[str, object]] = []
+    for name in sorted(set(reports) | set(cv_reports)):
+        if name in reports:
+            rows.extend(per_class_rows(name, "test", reports[name].per_class))
+        cv = cv_reports.get(name)
+        if cv is not None and cv.has_per_class:
+            rows.extend(per_class_rows(name, "cv", cv.per_class_frame(class_names)))
+    return pd.DataFrame(rows)
+
+
+def per_class_pass_table(per_class: pd.DataFrame) -> pd.DataFrame:
+    """Report, per configuration and partition, whether every class clears the target.
+
+    The weakest class is carried alongside the verdict: a configuration can
+    miss the bar on one class while averaging well above it, and the average
+    is what the headline metrics already show.
+    """
+    rows: List[Dict[str, object]] = []
+    for (config_name, partition), group in per_class.groupby(["config", "partition"]):
+        worst = group.loc[group[["precision", "recall"]].min(axis=1).idxmin()]
+        rows.append(
+            {
+                "config": config_name,
+                "partition": partition,
+                "min_precision": float(group.precision.min()),
+                "min_recall": float(group.recall.min()),
+                "weakest_class": str(worst["class"]),
+                "per_class_pass": bool(
+                    group.precision.min() >= PER_CLASS_TARGET
+                    and group.recall.min() >= PER_CLASS_TARGET
+                ),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["partition", "config"]).reset_index(drop=True)
+
+
+def save_per_class_outputs(
+    reports: Mapping[str, ClassificationReport],
+    cv_reports: Mapping[str, CrossValidationReport],
+    class_names: Sequence[str],
+    output_dir: Path,
+) -> pd.DataFrame:
+    """Write per_class.csv, the confusion CSVs, and return the pass table.
+
+    Pure serialisation of values the metric code already produced. Nothing
+    here fits, predicts or scores, so it cannot move a published figure.
+    """
+    per_class = collect_per_class(reports, cv_reports, class_names)
+    save_dataframe(per_class, output_dir / "per_class.csv", index=False)
+
+    confusion_dir = output_dir / "confusion"
+    for name, report in reports.items():
+        save_dataframe(
+            pd.DataFrame(
+                report.confusion_normalised,
+                index=list(class_names),
+                columns=list(class_names),
+            ),
+            confusion_dir / f"{name}.csv",
+        )
+
+    passes = per_class_pass_table(per_class)
+    save_dataframe(passes, output_dir / "per_class_pass.csv", index=False)
+    return passes
 
 
 def save_dataframe(frame: pd.DataFrame, output_path: Path, index: bool = True) -> Path:

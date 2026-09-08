@@ -48,7 +48,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence
 import numpy as np
 from sklearn.base import clone
 from sklearn.decomposition import PCA
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -465,6 +465,12 @@ def fit_decision_fusion(
 # Cross-validation for the enhancements
 # --------------------------------------------------------------------------- #
 
+def _fold_labels(config: Optional[Config]) -> List[int]:
+    """Label list for a fold confusion, so a fold missing a class still aligns."""
+    cfg = config or get_config()
+    return list(range(len(cfg.primary.display_names)))
+
+
 def cross_validate_matrix(
     matrix: FeatureMatrix,
     config: Optional[Config] = None,
@@ -483,6 +489,7 @@ def cross_validate_matrix(
 
     accuracies: List[float] = []
     macro_f1s: List[float] = []
+    confusions: List[np.ndarray] = []
     fit_times: List[float] = []
     for train_rows, validation_rows in leakage_safe_folds(matrix, cfg):
         fold = clone(estimator)
@@ -493,12 +500,14 @@ def cross_validate_matrix(
         truth = matrix.y[validation_rows]
         accuracies.append(float(accuracy_score(truth, predicted)))
         macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+        confusions.append(confusion_matrix(truth, predicted, labels=_fold_labels(config)))
 
     return CrossValidationReport(
         technique=name,
         accuracy_folds=np.asarray(accuracies, dtype=np.float64),
         macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
         fit_seconds=np.asarray(fit_times, dtype=np.float64),
+        fold_confusions=np.asarray(confusions, dtype=np.float64),
     )
 
 
@@ -522,6 +531,7 @@ def cross_validate_decision_fusion(
 
     accuracies: List[float] = []
     macro_f1s: List[float] = []
+    confusions: List[np.ndarray] = []
     for train_rows, validation_rows in leakage_safe_folds(reference, cfg):
         fold_train = {
             name: replace(
@@ -542,11 +552,13 @@ def cross_validate_decision_fusion(
         truth = reference.y[validation_rows]
         accuracies.append(float(accuracy_score(truth, predicted)))
         macro_f1s.append(float(f1_score(truth, predicted, average="macro", zero_division=0)))
+        confusions.append(confusion_matrix(truth, predicted, labels=_fold_labels(config)))
 
     return CrossValidationReport(
         technique=technique,
         accuracy_folds=np.asarray(accuracies, dtype=np.float64),
         macro_f1_folds=np.asarray(macro_f1s, dtype=np.float64),
+        fold_confusions=np.asarray(confusions, dtype=np.float64),
     )
 
 
