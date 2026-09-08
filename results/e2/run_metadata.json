@@ -1,0 +1,19 @@
+{
+  "per_class": "all",
+  "augmentation": false,
+  "n_images": 2400,
+  "n_train_images": 1920,
+  "scored_partition": "train (5-fold CV)",
+  "test_partition_used_for": "one closing evaluation of the winning arm",
+  "seed": 42,
+  "segmentation_method": "grabcut",
+  "configurations": [
+    "angle_averaged",
+    "d1",
+    "d123",
+    "levels16",
+    "levels64",
+    "moments",
+    "t2_default"
+  ]
+}

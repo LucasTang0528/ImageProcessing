@@ -1,0 +1,2 @@
+Noise band against the supporting t-test at alpha 0.05:
+  6 of 6 comparisons agree.

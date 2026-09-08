@@ -1,0 +1,4 @@
+Noise band against the supporting t-test at alpha 0.05:
+  10 of 11 comparisons agree.
+  disagreement: A+B+C minus decay share vs A+B+C (complete) - band distinguishes, test does not (p = 0.0517, diff -0.37 pp, sd 0.30 pp)
+  The criterion was fixed before these were computed. The band is the claim; the t-test is a supporting note.

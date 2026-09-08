@@ -1,0 +1,64 @@
+PREDICTION - E1.6, green-excluded decay share
+Recorded before the arm was run. Nothing below has been revised since.
+
+WHAT THE ARM CHANGES
+One dimension of 37. T1_decay_share currently counts any dominant colour
+cluster that is dark (CIE L* < 45) and weakly chromatic (chroma < 25).
+Shadowed green peel satisfies both, so on unripe fruit the index counts
+shade as decay. The arm additionally requires the cluster to be non-green
+(a* >= 0). The other 36 dimensions are untouched.
+
+MEASURED EFFECT ON THE DIMENSION ITSELF
+Training partition, 590 images, one extractor pass:
+
+  class     n    decay_off  decay_on  removed   green_share
+  Unripe  192        10.97      0.69    93.7%         91.99
+  Ripe    200         7.75      4.23    45.4%         14.22
+  Rotten  198        12.97     12.97     0.0%          6.19
+
+Rotten loses nothing, which is the result the mechanism predicts: real
+decay is brown and is never green. Separation of Rotten from Unripe on
+this dimension alone goes from 1.18x to 18.81x.
+
+PREDICTED ACCURACY DELTA
+  Point estimate  : +0.3 points of cross-validated accuracy
+  Interval        : -0.3 to +1.0 points
+  Confidence      : low. One dimension in 37 rarely moves an RBF much.
+
+REASONING
+The obvious mechanism - better Unripe separation - is predicted NOT to
+fire. Unripe is 91.99% green by T1_green_share, a dimension already in
+block C, so the classifier can already identify unripe fruit without
+reference to the decay index, and can in principle already discount an
+inflated decay reading when green_share is high. An RBF kernel on
+standardised features is expressive enough to represent that interaction.
+The information is therefore probably already present, just not in this
+dimension.
+
+The mechanism that could fire is Ripe against Rotten. That is T1's main
+error mode - the pilot confusion matrix sends 11.9% of Ripe to Rotten and
+15.0% of Rotten to Ripe - and it is the pair least helped by green_share,
+since neither class is green. On this dimension the Rotten-to-Ripe ratio
+improves from 1.67x to 3.07x, so any real gain should appear there and
+almost nowhere else.
+
+WHAT EACH OUTCOME WOULD MEAN
+  Gain > +1.0    Unexpected. Would suggest the contaminated dimension was
+                 actively misleading the classifier, not merely redundant.
+                 Check the per-class table before believing it.
+  +0.2 to +1.0   As predicted. Confirm the gain sits in Ripe/Rotten recall
+                 and not in Unripe, or the stated mechanism is wrong even
+                 though the number agrees.
+  -0.3 to +0.2   The likeliest outcome, and a finding rather than a
+                 failure: green_share already carries this separation, and
+                 the decay index is redundant with it for the purpose the
+                 exclusion was meant to serve. Report as redundancy.
+  < -0.3         Would mean the shadow contamination was itself useful,
+                 presumably as an indirect greenness measure. Report as
+                 measured; do not restore the flag default on that basis.
+
+FALSIFIABLE COMMITMENT
+If accuracy rises by more than 0.2 points, the per-class table must show
+the gain concentrated in Ripe and Rotten. If instead the gain appears in
+Unripe, the reasoning above is wrong and must be corrected rather than
+retrofitted.

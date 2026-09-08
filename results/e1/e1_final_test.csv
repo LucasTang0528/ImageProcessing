@@ -1,0 +1,2 @@
+arm,config_key,dropped_feature,selected_by,dimensionality,pipeline_stages,highest_accuracy_arm,highest_accuracy_cv,winner_cv_accuracy,margin_over_selected,arms_tied_with_leader,arms_compared,arms_scored_on_test,test_accuracy,test_macro_f1,test_weighted_f1,test_rows,selected_on
+N=3,n3,,parsimony,29,4,specular=off,0.8865184623805312,0.8727450072277658,0.013773455152765401,15,17,1,0.8974358974358975,0.8985051078507418,0.8976599367420088,468,"5-fold CV over the training partition, tie band then parsimony"
