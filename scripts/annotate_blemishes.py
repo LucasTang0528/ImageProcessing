@@ -13,13 +13,28 @@ Annotation happens in the **preprocessed 224 x 224 frame**, the same frame the
 descriptor works in, so a painted mask lines up pixel for pixel with the
 ``blemish_mask`` the extractor returns and no resampling sits between the two.
 
-Images are drawn from the **training partition only**, with the same seed and
-the same split the experiments use, so annotating cannot leak the test set.
+Images come from ``results/annotations/subset.csv``, written by
+``scripts/select_annotation_subset.py``, which draws them from the **test
+partition**: the coverage measurement has to be validated on images the
+pipeline was not fitted on. That is safe only while nothing is selected or
+tuned on the resulting error. If a blemish method is ever chosen by its MAE,
+these annotations become a test-set leak and the subset must move to the
+training partition instead.
+
+Two annotators paint the same images independently, and a merge step keeps
+only the pixels both marked. A single annotator's mask is one opinion about a
+boundary that is genuinely ambiguous - where exactly a bruise stops - and an
+error measured against one opinion cannot be told apart from that opinion's
+own noise. The per-image Jaccard index between the two says how much of the
+measured error is really disagreement.
 
 Run from the project root::
 
-    python scripts/annotate_blemishes.py --count 30     # paint 30 images
-    python scripts/annotate_blemishes.py --list         # what is done so far
+    python scripts/select_annotation_subset.py                    # choose the 60
+    python scripts/annotate_blemishes.py --annotator alice        # alice paints
+    python scripts/annotate_blemishes.py --annotator bob          # bob paints
+    python scripts/annotate_blemishes.py --merge                  # reference + agreement
+    python scripts/annotate_blemishes.py --list                   # progress
 
 Controls
 --------
@@ -46,7 +61,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -61,17 +76,63 @@ from config import Config, get_config  # noqa: E402
 from data import ImageRecord, load_primary  # noqa: E402
 from harness import prepare_sample, set_global_seed, stratified_split  # noqa: E402
 
-#: Where painted masks and their index live.
-ANNOTATION_ROOT = PROJECT_ROOT / "data" / "annotations" / "blemish"
+#: Where the subset, the painted masks, the merged reference and the
+#: agreement report all live. Kept under results/ rather than data/ because
+#: these are produced by the study, not inputs to it.
+ANNOTATION_ROOT = PROJECT_ROOT / "results" / "annotations"
 INDEX_NAME = "index.csv"
+SUBSET_NAME = "subset.csv"
+REFERENCE_DIR = "reference"
+
+#: Directory names that hold merged or derived output rather than one
+#: annotator's work, and so must never be treated as an annotator.
+RESERVED_DIRS = frozenset({REFERENCE_DIR})
 
 WINDOW = "FreshSight - paint blemishes"
 BRUSH_MIN, BRUSH_MAX = 1, 30
 
 
-def annotation_path(root: Path, record: ImageRecord) -> Path:
-    """Where one record's painted mask is stored."""
-    return root / record.class_folder / f"{record.path.stem}.png"
+def annotation_path(root: Path, annotator: str, image_id: str) -> Path:
+    """Where one annotator's mask for one image is stored."""
+    return root / annotator / f"{image_id}.png"
+
+
+def load_subset(root: Path, config: Config) -> pd.DataFrame:
+    """Read the agreed annotation subset, refusing to invent one.
+
+    The subset is a shared artefact: two annotators must paint the same
+    images or their masks cannot be compared. Selecting images here, as this
+    tool used to, would let each annotator silently work on a different draw.
+    """
+    subset = root / SUBSET_NAME
+    if not subset.exists():
+        raise SystemExit(
+            f"no {subset}. Run scripts/select_annotation_subset.py first so that "
+            f"every annotator paints the same images."
+        )
+    frame = pd.read_csv(subset)
+    missing = [p for p in frame.path if not (PROJECT_ROOT / p).exists()]
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} image(s) in the subset are not on disk, "
+            f"starting with {missing[0]}"
+        )
+    return frame
+
+
+def subset_records(frame: pd.DataFrame, config: Config) -> List[ImageRecord]:
+    """Rebuild ImageRecords from the subset index, in its stored order."""
+    display = list(config.primary.display_names)
+    return [
+        ImageRecord(
+            path=PROJECT_ROOT / row.path,
+            label=int(row.label),
+            class_folder=str(row.class_folder),
+            display_name=display[int(row.label)],
+            source=str(row.source),
+        )
+        for row in frame.itertuples()
+    ]
 
 
 def sample_records(
@@ -152,8 +213,21 @@ def render(image: np.ndarray, canvas: Canvas, fruit: np.ndarray, hide: bool, cap
     return np.vstack([view, banner])
 
 
-def annotate(records: Sequence[ImageRecord], root: Path, config: Config) -> int:
-    """Run the painting loop. Returns the number of masks written."""
+def annotate(
+    records: Sequence[ImageRecord],
+    image_ids: Sequence[str],
+    root: Path,
+    config: Config,
+    annotator: str,
+    overwrite: bool = False,
+) -> int:
+    """Run the painting loop for one annotator. Returns masks written.
+
+    An image this annotator has already painted is skipped unless
+    ``overwrite`` is set. Silently reopening finished work invites painting
+    over it by accident, and one annotator's mask is not reproducible: unlike
+    every other artefact here it cannot be regenerated if lost.
+    """
     root.mkdir(parents=True, exist_ok=True)
     cv2.namedWindow(WINDOW)
     written = 0
@@ -161,11 +235,17 @@ def annotate(records: Sequence[ImageRecord], root: Path, config: Config) -> int:
 
     while 0 <= index < len(records):
         record = records[index]
+        destination = annotation_path(root, annotator, image_ids[index])
+        if destination.exists() and not overwrite:
+            print(f"  skipping {image_ids[index]}: already painted by {annotator} "
+                  f"(--overwrite to replace)")
+            index += 1
+            continue
+
         sample = prepare_sample(record, config=config, record_index=index)
         image, fruit = sample.image, sample.mask
 
         canvas = Canvas(image.shape[:2])
-        destination = annotation_path(root, record)
         if destination.exists():
             existing = cv2.imread(str(destination), cv2.IMREAD_GRAYSCALE)
             if existing is not None and existing.shape == canvas.mask.shape:
@@ -194,7 +274,7 @@ def annotate(records: Sequence[ImageRecord], root: Path, config: Config) -> int:
             painted = int(np.count_nonzero(canvas.mask))
             fruit_px = max(int(np.count_nonzero(fruit)), 1)
             caption = (
-                f"{index + 1}/{len(records)}  {record.class_folder}/{record.path.name}"
+                f"[{annotator}] {index + 1}/{len(records)}  {record.path.name}"
                 f"   ratio {100.0 * painted / fruit_px:5.2f}%"
             )
             cv2.imshow(WINDOW, render(image, canvas, fruit, state["hide"], caption))
@@ -232,25 +312,138 @@ def annotate(records: Sequence[ImageRecord], root: Path, config: Config) -> int:
     return written
 
 
-def rebuild_index(records: Sequence[ImageRecord], root: Path, config: Config) -> pd.DataFrame:
-    """Summarise every painted mask, and the blemish ratio it implies."""
-    rows = []
-    for record in records:
-        painted_path = annotation_path(root, record)
-        if not painted_path.exists():
+def discover_annotators(root: Path) -> List[str]:
+    """Return the annotator directories present, excluding derived output."""
+    if not root.exists():
+        return []
+    return sorted(
+        entry.name
+        for entry in root.iterdir()
+        if entry.is_dir() and entry.name not in RESERVED_DIRS
+    )
+
+
+def _read_mask(path: Path) -> Optional[np.ndarray]:
+    """Read one painted mask as a boolean array, or None if absent."""
+    if not path.exists():
+        return None
+    raw = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    return None if raw is None else raw > 127
+
+
+def jaccard(first: np.ndarray, second: np.ndarray) -> float:
+    """Intersection over union of two boolean masks.
+
+    Two annotators who both, correctly, paint nothing agree perfectly, so the
+    empty-empty case is 1.0 rather than undefined. Scoring it 0 would punish
+    the clean fruit that the Unripe class is full of.
+    """
+    union = int(np.count_nonzero(first | second))
+    if union == 0:
+        return 1.0
+    return float(np.count_nonzero(first & second) / union)
+
+
+def merge_annotations(
+    frame: pd.DataFrame,
+    root: Path,
+    annotators: Sequence[str],
+) -> pd.DataFrame:
+    """Write consensus reference masks and report inter-annotator agreement.
+
+    A pixel enters the reference only where **every** annotator marked it.
+    Intersection rather than union is the conservative choice: it yields the
+    blemish extent nobody disputes, so the reference ratio is a lower bound
+    and the pipeline is never charged for a pixel one annotator called peel.
+
+    Agreement is reported alongside, because an MAE measured against masks the
+    annotators themselves disagree about cannot be read without knowing how
+    much they disagreed.
+    """
+    if len(annotators) < 2:
+        raise SystemExit(
+            f"merging needs at least two annotators, found {annotators or 'none'}. "
+            f"Each paints with --annotator <name>."
+        )
+
+    reference_dir = root / REFERENCE_DIR
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    rows: List[dict] = []
+
+    for row in frame.itertuples():
+        masks = {a: _read_mask(annotation_path(root, a, row.image_id)) for a in annotators}
+        present = {a: m for a, m in masks.items() if m is not None}
+        if len(present) < 2:
+            rows.append(
+                {
+                    "image_id": row.image_id,
+                    "display_name": row.display_name,
+                    "n_annotators": len(present),
+                    "jaccard": float("nan"),
+                    "reference_px": 0,
+                    "status": "incomplete",
+                }
+            )
             continue
-        painted = cv2.imread(str(painted_path), cv2.IMREAD_GRAYSCALE)
-        if painted is None:
-            continue
-        sample = prepare_sample(record, config=config)
-        fruit_px = max(int(np.count_nonzero(sample.mask)), 1)
-        blemish_px = int(np.count_nonzero(painted > 127))
+
+        shapes = {m.shape for m in present.values()}
+        if len(shapes) != 1:
+            raise SystemExit(
+                f"{row.image_id}: annotators painted different frame sizes {shapes}"
+            )
+
+        consensus = np.logical_and.reduce(list(present.values()))
+        cv2.imwrite(str(reference_dir / f"{row.image_id}.png"),
+                    (consensus * 255).astype(np.uint8))
+
+        pairs = [
+            jaccard(present[a], present[b])
+            for i, a in enumerate(sorted(present))
+            for b in sorted(present)[i + 1:]
+        ]
         rows.append(
             {
+                "image_id": row.image_id,
+                "display_name": row.display_name,
+                "n_annotators": len(present),
+                "jaccard": float(np.mean(pairs)),
+                "reference_px": int(np.count_nonzero(consensus)),
+                "status": "merged",
+            }
+        )
+
+    agreement = pd.DataFrame(rows)
+    agreement.to_csv(root / "agreement.csv", index=False)
+    return agreement
+
+
+def rebuild_index(
+    records: Sequence[ImageRecord],
+    image_ids: Sequence[str],
+    root: Path,
+    config: Config,
+) -> pd.DataFrame:
+    """Index the merged reference masks and their blemish ratios.
+
+    The ratio uses the full fruit mask as denominator, matching the formula
+    T3 reports, so the two numbers are directly comparable.
+    """
+    reference_dir = root / REFERENCE_DIR
+    rows: List[dict] = []
+    for index, (record, image_id) in enumerate(zip(records, image_ids)):
+        painted = _read_mask(reference_dir / f"{image_id}.png")
+        if painted is None:
+            continue
+        sample = prepare_sample(record, config=config, record_index=index)
+        fruit_px = max(int(np.count_nonzero(sample.mask)), 1)
+        blemish_px = int(np.count_nonzero(painted))
+        rows.append(
+            {
+                "image_id": image_id,
                 "path": str(record.path),
                 "class_folder": record.class_folder,
+                "display_name": record.display_name,
                 "label": record.label,
-                "annotation": str(painted_path),
                 "fruit_px": fruit_px,
                 "blemish_px": blemish_px,
                 "blemish_ratio_pct": 100.0 * blemish_px / fruit_px,
@@ -262,22 +455,61 @@ def rebuild_index(records: Sequence[ImageRecord], root: Path, config: Config) ->
 def main(argv: Sequence[str] | None = None) -> int:
     config = get_config()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--count", type=int, default=30,
-                        help="How many images to offer, class balanced.")
+    parser.add_argument("--annotator",
+                        help="Who is painting. Masks go to <root>/<annotator>/.")
     parser.add_argument("--root", type=Path, default=ANNOTATION_ROOT,
-                        help="Where painted masks are stored.")
+                        help="Where the subset, masks and reference live.")
+    parser.add_argument("--merge", action="store_true",
+                        help="Build consensus reference masks and report agreement.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Repaint images this annotator has already done.")
     parser.add_argument("--list", action="store_true",
-                        help="Report what is annotated so far and exit.")
+                        help="Report progress and exit.")
     args = parser.parse_args(argv)
 
-    set_global_seed(config)
-    records = sample_records(load_primary(config), args.count, config)
+    if args.annotator and args.annotator in RESERVED_DIRS:
+        parser.error(f"{args.annotator!r} is reserved for merged output")
 
-    if not args.list:
-        print(f"Annotating {len(records)} images from the training partition.")
-        print("The test split is not sampled, so annotating cannot leak it.\n")
+    set_global_seed(config)
+    frame = load_subset(args.root, config)
+    records = subset_records(frame, config)
+    image_ids = list(frame.image_id)
+    annotators = discover_annotators(args.root)
+
+    if args.list:
+        print(f"Subset: {len(records)} images from the test partition.")
+        if not annotators:
+            print("No annotator has painted anything yet.")
+            return 0
+        for name in annotators:
+            done = sum(annotation_path(args.root, name, i).exists() for i in image_ids)
+            print(f"  {name:16s} {done:3d}/{len(image_ids)}")
+        reference = sum((args.root / REFERENCE_DIR / f"{i}.png").exists() for i in image_ids)
+        print(f"  {'reference':16s} {reference:3d}/{len(image_ids)}")
+        return 0
+
+    if args.merge:
+        agreement = merge_annotations(frame, args.root, annotators)
+        merged = agreement[agreement.status == "merged"]
+        print(f"Merged {len(merged)} of {len(agreement)} images "
+              f"from annotators: {', '.join(annotators)}")
+        if not merged.empty:
+            print(f"  mean Jaccard agreement : {merged.jaccard.mean():.3f}")
+            print(f"  worst image            : {merged.jaccard.min():.3f} "
+                  f"({merged.loc[merged.jaccard.idxmin(), 'image_id']})")
+            print()
+            print(merged.groupby("display_name")["jaccard"].agg(["count", "mean"]).round(3).to_string())
+        incomplete = agreement[agreement.status != "merged"]
+        if not incomplete.empty:
+            print(f"\n  {len(incomplete)} image(s) still need a second annotator.")
+        print(f"\n  agreement written to {args.root / 'agreement.csv'}")
+    elif args.annotator:
+        print(f"Annotating {len(records)} images as {args.annotator!r}.")
+        print("These come from the TEST partition. Nothing may be tuned on the")
+        print("resulting error, or these annotations become a test-set leak.\n")
         try:
-            written = annotate(records, args.root, config)
+            written = annotate(records, image_ids, args.root, config,
+                               args.annotator, args.overwrite)
         except cv2.error as error:
             print(
                 "OpenCV could not open a window, so annotation needs a desktop "
@@ -285,21 +517,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"\nWrote {written} mask(s) under {args.root}")
+        print(f"\nWrote {written} mask(s) under {args.root / args.annotator}")
+    else:
+        parser.error("give --annotator to paint, --merge to combine, or --list")
 
-    index = rebuild_index(records, args.root, config)
+    index = rebuild_index(records, image_ids, args.root, config)
     if index.empty:
-        print("No annotations found yet.")
+        print("\nNo reference masks yet; run --merge once two annotators have painted.")
         return 0
 
-    args.root.mkdir(parents=True, exist_ok=True)
     index.to_csv(args.root / INDEX_NAME, index=False)
-    print(f"\n{len(index)} annotated image(s), index at {args.root / INDEX_NAME}")
+    print(f"\n{len(index)} reference mask(s), index at {args.root / INDEX_NAME}")
     print(
-        index.groupby("class_folder")["blemish_ratio_pct"]
-        .agg(["count", "mean", "max"])
-        .round(3)
-        .to_string()
+        index.groupby("display_name")["blemish_ratio_pct"]
+        .agg(["count", "mean", "max"]).round(3).to_string()
     )
     print("\nRe-run scripts/run_t3_experiments.py to fill the E3.4 error column.")
     return 0
