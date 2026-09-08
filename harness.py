@@ -22,6 +22,9 @@ illumination normalisation that a real image would be.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -391,7 +394,7 @@ def _grabcut_binary(image_bgr: np.ndarray, seg, seed: int) -> np.ndarray:
     return np.where(foreground, 255, 0).astype(np.uint8)
 
 
-def segment_fruit(
+def _segment_fruit_uncached(
     image_bgr: np.ndarray,
     config: Optional[Config] = None,
 ) -> SegmentationResult:
@@ -448,8 +451,9 @@ def segment_fruit(
         #
         # Growth is measured against the seed's area rather than as an overlap,
         # because image grain lets GrabCut creep a little way past the core
-        # even on a blank frame - a uniform frame grows by about 1.3x, whereas
-        # a real fruit covers several times the core.
+        # even on a blank frame - a uniform frame grows by about 1.05x, whereas
+        # a real fruit covers several times the core. Measured on flat grey,
+        # flat white and grey-plus-grain frames: 1.05x, 1.05x, 1.07x.
         core_area = np.count_nonzero(_core_ellipse(image_bgr.shape[:2], seg))
         growth = (np.count_nonzero(mask) / core_area) if core_area else 0.0
         minimum_growth = float(seg.grabcut["min_seed_growth"])
@@ -500,6 +504,164 @@ def segment_fruit(
 
     mask, box = candidates[chosen]
     return _judge_coverage(mask, box, chosen, float(threshold), seg, seg.method)
+
+
+# --------------------------------------------------------------------------- #
+# Segmentation cache
+# --------------------------------------------------------------------------- #
+
+#: Bumped whenever the cached representation itself changes shape, so that a
+#: cache written by an older version is ignored rather than misread.
+_CACHE_FORMAT = "v1"
+
+
+def _segmentation_signature(config: Config) -> str:
+    """Hash every input that can change what the segmenter returns.
+
+    The key deliberately covers the whole ``segmentation`` block rather than
+    the handful of fields the active method happens to read. Hashing only the
+    live fields would let a change to ``method`` reuse masks computed under the
+    other one, which is exactly the silent corruption a cache must not permit.
+
+    The seed is included because the GrabCut path reseeds OpenCV's global
+    generator from it, so it is an input to the mask like any other.
+    """
+    payload = json.dumps(
+        {
+            "format": _CACHE_FORMAT,
+            "seed": config.seed,
+            "segmentation": config.raw.get("segmentation", {}),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _image_digest(image_bgr: np.ndarray) -> str:
+    """Hash the pixels the segmenter will actually see.
+
+    Keyed on content, never on the file it came from. The harness augments a
+    training image into several variants, all of which share a path but none
+    of which share a mask; a path-keyed cache would hand every variant the
+    original's mask and quietly destroy the augmentation.
+    """
+    contiguous = np.ascontiguousarray(image_bgr)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.shape).encode("ascii"))
+    digest.update(str(contiguous.dtype).encode("ascii"))
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+def _cache_path(image_bgr: np.ndarray, config: Config) -> Path:
+    """Return the file a cached result for this image would occupy."""
+    digest = _image_digest(image_bgr)
+    root = config.paths.cache_root / "segmentation" / _segmentation_signature(config)
+    return root / digest[:2] / f"{digest}.npz"
+
+
+def _load_cached(path: Path) -> Optional[SegmentationResult]:
+    """Rebuild a result from disk, or return None if it cannot be read.
+
+    Any failure - a truncated file from an interrupted run, an unreadable
+    archive, a missing field - is treated as a cache miss. A cache is an
+    optimisation, so it may never be the reason a run fails.
+    """
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            mask = archive["mask"]
+            meta = json.loads(str(archive["meta"]))
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+    return SegmentationResult(
+        mask=mask,
+        bbox=tuple(int(v) for v in meta["bbox"]),
+        contour=_outer_contour(mask),
+        coverage=float(meta["coverage"]),
+        polarity=str(meta["polarity"]),
+        threshold=float(meta["threshold"]),
+        method=str(meta["method"]),
+        failed=bool(meta["failed"]),
+        reason=str(meta["reason"]),
+        substituted=bool(meta["substituted"]),
+    )
+
+
+def _store_cached(path: Path, result: SegmentationResult) -> None:
+    """Write a result to the cache atomically.
+
+    The contour is not stored: it is a pure function of the mask, recomputed
+    on load by the same routine that produced it. Storing a derived value
+    would create a second place for it to disagree with the mask.
+
+    The write goes to a temporary file in the destination directory and is
+    renamed into place, so a run interrupted mid-write leaves either the old
+    entry or none, never a half-written archive that a later run would read.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = json.dumps(
+        {
+            "bbox": [int(v) for v in result.bbox],
+            "coverage": float(result.coverage),
+            "polarity": result.polarity,
+            "threshold": float(result.threshold),
+            "method": result.method,
+            "failed": bool(result.failed),
+            "reason": result.reason,
+            "substituted": bool(result.substituted),
+        },
+        sort_keys=True,
+    )
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        with open(temporary, "wb") as handle:
+            np.savez_compressed(handle, mask=result.mask, meta=np.array(meta))
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)  # A cache write must never fail a run.
+
+
+def segment_fruit(
+    image_bgr: np.ndarray,
+    config: Optional[Config] = None,
+) -> SegmentationResult:
+    """Segment the fruit, reusing a cached mask when one is available.
+
+    Segmentation is a pure function of the preprocessed image and the
+    ``segmentation`` configuration, and it is by far the most expensive stage
+    in the pipeline: every technique re-derives the same masks over the same
+    images, and every experiment arm re-derives them again. Caching removes
+    that repetition without changing a single mask, because the cache key
+    covers every input the result depends on - the image pixels themselves,
+    the whole segmentation block, and the seed.
+
+    Caching is controlled by ``segmentation.cache_masks``. With it disabled
+    this function is exactly :func:`_segment_fruit_uncached`.
+
+    Args:
+        image_bgr: A preprocessed ``uint8`` BGR image.
+        config: Optional configuration override.
+
+    Returns:
+        A :class:`SegmentationResult`, identical whether it was computed or
+        loaded.
+    """
+    cfg = config or get_config()
+    if not cfg.segmentation.cache_masks:
+        return _segment_fruit_uncached(image_bgr, cfg)
+
+    path = _cache_path(image_bgr, cfg)
+    cached = _load_cached(path)
+    if cached is not None:
+        return cached
+
+    result = _segment_fruit_uncached(image_bgr, cfg)
+    _store_cached(path, result)
+    return result
 
 
 # --------------------------------------------------------------------------- #
