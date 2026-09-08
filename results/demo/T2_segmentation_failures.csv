@@ -1,0 +1,5 @@
+path,class_folder,source,variant,coverage,reason,substituted
+N:\Degree\IP\Assignment\ImageProcessing\data\primary\UnripeApple\UnripeApple (203).jpg,UnripeApple,primary,0,0.09165736607142858,"GrabCut grew to only 1.47x its seeded foreground core (minimum 1.50x), so the image offers no fruit-like region to segment",False
+N:\Degree\IP\Assignment\ImageProcessing\data\primary\UnripeApple\UnripeApple (382).jpg,UnripeApple,primary,0,0.08888711734693877,"GrabCut grew to only 1.43x its seeded foreground core (minimum 1.50x), so the image offers no fruit-like region to segment",False
+N:\Degree\IP\Assignment\ImageProcessing\data\primary\UnripeApple\UnripeApple (457).jpg,UnripeApple,primary,0,0.07720822704081633,"GrabCut grew to only 1.24x its seeded foreground core (minimum 1.50x), so the image offers no fruit-like region to segment",False
+N:\Degree\IP\Assignment\ImageProcessing\data\primary\UnripeApple\UnripeApple (57).jpg,UnripeApple,primary,0,0.0905014349489796,"GrabCut grew to only 1.45x its seeded foreground core (minimum 1.50x), so the image offers no fruit-like region to segment",False
