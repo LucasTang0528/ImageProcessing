@@ -1,0 +1,14 @@
+{
+  "mode": "PILOT",
+  "per_class": 300,
+  "augmentation": false,
+  "n_images": 900,
+  "n_train_images": 720,
+  "n_test_images": 180,
+  "techniques": [
+    "T1",
+    "T2"
+  ],
+  "seed": 42,
+  "segmentation_method": "grabcut"
+}

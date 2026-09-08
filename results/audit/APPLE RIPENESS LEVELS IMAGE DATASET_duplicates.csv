@@ -1,0 +1,16 @@
+distance,colour_rmse,class_a,class_b,cross_class,file_a,file_b
+0,0.0,40%,40%,False,citra1.jpg,citra96.jpg
+0,0.0,40%,40%,False,citra100.jpg,citra24.jpg
+0,0.0,40%,40%,False,citra17.jpg,citra2.jpg
+0,0.0,40%,40%,False,citra18.jpg,citra3.jpg
+0,0.0,40%,40%,False,citra21.jpg,citra97.jpg
+0,0.0,40%,40%,False,citra22.jpg,citra98.jpg
+0,0.0,40%,40%,False,citra23.jpg,citra99.jpg
+0,0.0,40%,40%,False,citra4.jpg,citra95.jpg
+0,0.7098635432250342,40%,40%,False,citra68.jpg,citra72.jpg
+0,1.1422291801560667,40%,40%,False,citra60.jpg,citra64.jpg
+0,1.5727786915202024,40%,40%,False,citra90.jpg,citra94.jpg
+0,2.060921112836038,40%,40%,False,citra85.jpg,citra89.jpg
+1,2.555121490914538,40%,40%,False,citra19.jpg,citra23.jpg
+1,2.555121490914538,40%,40%,False,citra19.jpg,citra99.jpg
+2,2.302342557049233,20%,20%,False,citra49.jpg,citra53.jpg

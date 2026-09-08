@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "per_class_annotate": 20,
+  "n_selected": 60,
+  "drawn_from": "test partition of the full primary dataset",
+  "n_primary_records": 2400,
+  "n_train_records": 1920,
+  "n_test_records": 480,
+  "test_size": 0.2,
+  "classes": [
+    "Unripe",
+    "Ripe",
+    "Rotten"
+  ]
+}

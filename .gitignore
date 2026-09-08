@@ -13,9 +13,20 @@ data/*.tar
 data/*.tar.gz
 data/*.tgz
 
-# Generated results
+# Generated results. Metrics travel with commits; heavy artefacts do not.
+# Order matters: git will not descend into an excluded directory, so the
+# directories must be re-included before any pattern inside them can match.
 results/**
 !results/.gitkeep
+!results/**/
+!results/**/*.csv
+!results/**/*.json
+!results/**/*.txt
+# Caches and images are regenerable and large, so they stay out even though
+# they sit under a re-included directory.
+results/cache/**
+results/**/*.png
+results/**/*.jpg
 
 # Credentials - never commit an API token.
 # NOTE: deliberately NOT a blanket "*.json". config.json is the experiment's

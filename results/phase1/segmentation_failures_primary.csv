@@ -1,0 +1,3 @@
+path,class_folder,source,variant,coverage,reason,substituted
+C:\Users\Khuan Zhi\ACADEMIC\FreshSight\data\primary\RottenApple\RottenApple (21).jpg,RottenApple,primary,0,0.039341517857142856,"mask covers 3.9% of the frame, below the permitted 5%-95% range",False
+C:\Users\Khuan Zhi\ACADEMIC\FreshSight\data\primary\RottenApple\RottenApple (641).jpg,RottenApple,primary,0,0.03559470663265306,"mask covers 3.6% of the frame, below the permitted 5%-95% range",False
