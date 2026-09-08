@@ -1,14 +1,18 @@
 {
   "mode": "PILOT",
-  "per_class": 300,
-  "augmentation": false,
-  "n_images": 900,
-  "n_train_images": 720,
-  "n_test_images": 180,
-  "techniques": [
-    "T1",
-    "T2"
-  ],
+  "per_class": 100,
+  "augmentation": true,
+  "n_train_rows": 947,
+  "n_test_rows": 59,
+  "excluded_train": 13,
+  "excluded_test": 1,
+  "e3_weights": {
+    "T1": 0.8481939139292081,
+    "T2": 0.529268524919934,
+    "T3": 0.6788131761708611
+  },
+  "best_individual": "T1",
   "seed": 42,
-  "segmentation_method": "grabcut"
+  "segmentation_method": "grabcut",
+  "background_only_control": 0.7395833333333334
 }

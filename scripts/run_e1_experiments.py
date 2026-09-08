@@ -1,33 +1,46 @@
-"""E1 sub-experiments: what the dominant colour descriptor's choices are worth.
+"""T1 internal comparative experiments (E1.1 to E1.5).
 
-Six questions, each isolating one decision taken when T1 was specified:
+Five questions about the MPEG-7 dominant colour descriptor, each answered by
+5-fold stratified cross-validation on the **training partition only**:
 
-======  =========================================================  =========
-E1.1    dominant colours against a colour-histogram baseline       e1_1.csv
-E1.2    how many dominant colours, N = 3, 4, 5, 6                  e1_2.csv
-E1.3    which space the clustering runs in, Lab, HSV, RGB          e1_3.csv
-E1.4    whether specular highlights are excluded                   e1_4.csv
-E1.5    which blocks of the descriptor carry the signal            e1_5.csv
-E1.6    the decay index with shadowed green peel excluded         e1_6.csv
-======  =========================================================  =========
+===== =========================================================================
+E1.1  Does the descriptor beat a conventional colour histogram? 37 dimensions
+      of dominant colours against a 105-dimension 32-bin histogram with
+      Stricker and Orengo colour moments.
+E1.2  How many dominant colours? ``N`` in {3, 4, 5, 6}.
+E1.3  Which clustering space? CIE L*a*b*, HSV, RGB.
+E1.4  Is specular exclusion worth it? On against off, with the share of pixels
+      each arm discards reported alongside.
+E1.5  What does each block contribute? A alone (28), A+B (32), A+B+C (37), and
+      A+B+C without the decay-share dimension (36).
+===== =========================================================================
 
-Every arm is scored on **one shared segmentation pass**. Segmentation is the
-expensive stage and is identical for all of them - no arm here changes the
-mask - so re-segmenting per arm would cost hours and buy nothing. Building the
-matrices together also guarantees the arms are compared on exactly the same
-images, including the same segmentation failures.
+The naming collides with Phase 5, which is unfortunate and worth stating
+plainly: **E1.1 to E1.5 here are sweeps of the T1 descriptor**, and have
+nothing to do with the enhancement ``scripts/run_enhancements.py`` calls E1,
+which is feature-level fusion of all three techniques. Different experiment,
+different file, different directory.
 
-All scoring is 5-fold cross-validation on the **training partition only**,
-through :func:`evaluate.cross_validate_technique`, which draws leakage-safe
-folds over source images and validates on originals only. The test partition
-is never touched: these experiments choose nothing, they explain a choice
-already made, and a sweep scored on held-out data would turn that data into a
-tuning set.
+The test split is never read. It is drawn by the shared harness and then left
+alone, so nothing tuned here can be justified by the numbers it will later be
+judged against. Nothing here is tuned towards the report's acceptance targets
+either: a worse number is a result.
+
+Every variant is scored on one shared segmentation pass, exactly as
+``run_t3_experiments.py`` does. Preprocessing and seeded GrabCut cost roughly
+400 ms per image against the descriptor's 45 ms, and they are identical across
+variants by construction - the descriptor is the only thing being changed - so
+running them once and fanning out to all eight configurations is both far
+faster and stricter than eight independent passes, which could otherwise drift
+apart.
 
 Run from the project root::
 
-    python scripts/run_e1_experiments.py --per-class 100    # quick look
-    python scripts/run_e1_experiments.py                    # the reported run
+    # Smoke: exercises all five experiments end to end in about a minute.
+    python scripts/run_e1_experiments.py --per-class 25 --no-augment --tag smoke
+
+    # The full run the report quotes. Roughly 25 minutes.
+    python scripts/run_e1_experiments.py
 
 Results land in ``results/e1/``.
 """
@@ -36,14 +49,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
-from scipy import stats
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -53,14 +67,10 @@ import pandas as pd  # noqa: E402
 
 from config import Config, get_config  # noqa: E402
 from data import ImageRecord, load_primary  # noqa: E402
-from evaluate import (  # noqa: E402
-    classification_metrics,
-    cross_validate_technique,
-    print_report,
-    save_dataframe,
-)
+from evaluate import cross_validate_technique, save_dataframe  # noqa: E402
+from features.base import FeatureExtractionError  # noqa: E402
+from features.colour_histogram import ColourHistogramExtractor  # noqa: E402
 from features.t1_dominant_colour import DominantColourExtractor  # noqa: E402
-from features.t1_histogram_baseline import ColourHistogramExtractor  # noqa: E402
 from harness import (  # noqa: E402
     FeatureMatrix,
     build_pipeline,
@@ -69,209 +79,193 @@ from harness import (  # noqa: E402
     set_global_seed,
     stratified_split,
 )
-from run_benchmarks import balanced_subset  # noqa: E402
 
-#: The dimension E1.5 removes. Named rather than indexed, because the position
-#: of a feature moves whenever N changes and an index would silently start
-#: deleting a different column.
-DECAY_FEATURE = "T1_decay_share"
-
-#: The prediction for E1.6, written before the arm was run. Its hash goes into
-#: the result row so that "the prediction preceded the result" is a checkable
-#: claim rather than an asserted one: the file cannot be edited after the fact
-#: without the recorded digest ceasing to match.
-PREDICTION_FILE = PROJECT_ROOT / "results" / "predictions" / "e1_6_decay_green_exclusion.txt"
-
-
-def prediction_digest(path: Path = PREDICTION_FILE) -> str:
-    """SHA-256 of the recorded prediction, or a marker if it is absent."""
-    if not path.exists():
-        return "ABSENT"
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
+#: Every distinct extractor configuration the five experiments need, named.
+#: ``baseline`` is the descriptor as ``config.json`` configures it and is
+#: shared by all five, so it is extracted once.
+#:
+#: E1.5 is absent from this table on purpose. Its four arms differ only in
+#: which blocks are emitted, the blocks are computed independently of one
+#: another, and they are concatenated in a fixed order - so an arm is obtained
+#: by selecting columns from the full vector rather than by re-extracting. The
+#: values are identical either way, and selecting keeps all four arms on
+#: exactly the same images. :func:`assert_block_layout` checks that
+#: assumption against the extractor rather than trusting it.
 #: Image-processing operations each configuration performs before it emits a
-#: vector, used only as the second parsimony tie-break. Counted explicitly
-#: rather than inferred, so the number is auditable rather than a guess:
-#: colour conversion, specular exclusion, clustering, and summarising are one
-#: each. Selecting blocks or changing N adds no operation, so those arms all
-#: carry the same count as the default.
+#: vector, used only as the second parsimony tie-break in select_winner.
+#: Counted explicitly rather than inferred: colour conversion, specular
+#: exclusion, clustering and summarising are one each. Changing N or selecting
+#: blocks adds no operation, so those arms carry the default's count.
 PIPELINE_STAGES = {
-    "t1_default": 4,            # convert, exclude specular, cluster, summarise
-    "specular_off": 3,          # convert, cluster, summarise
-    "histogram": 2,             # convert, histogram and moments
-    "n3": 4, "n5": 4, "n6": 4,
-    "space_HSV": 4, "space_RGB": 4,
-    "blocks_A": 4, "blocks_AB": 4,
+    "baseline": 4,
+    "n_colours_3": 4, "n_colours_5": 4, "n_colours_6": 4,
+    "space_hsv": 4, "space_rgb": 4,
+    "specular_off": 3,
+    "histogram_baseline": 3,       # convert, exclude specular, histogram+moments
     "decay_green_excluded": 4,
 }
 
-#: Columns that are text rather than measurements. Listed so that a value of
-#: "" survives a CSV round-trip instead of returning as a missing number.
-STRING_COLUMNS = (
-    "arm", "config_key", "dropped_feature", "reference_arm", "representation",
-    "prediction_sha256", "distances", "blocks", "space", "selected_by",
-    "highest_accuracy_arm", "selected_on",
-)
+DCD_VARIANTS: Dict[str, dict] = {
+    "baseline": {},
+    "n_colours_3": {"n_colours": 3},
+    "n_colours_5": {"n_colours": 5},
+    "n_colours_6": {"n_colours": 6},
+    "space_hsv": {"space": "HSV"},
+    "space_rgb": {"space": "RGB"},
+    "specular_off": {"exclude_specular": False},
+    "decay_green_excluded": {"decay_exclude_green": True},
+}
 
-#: Fold-accuracy column names produced by :func:`score`.
-FOLD_COLUMNS = tuple(f"fold{index}_accuracy" for index in range(1, 6))
-
-
-def fold_matrix(table: pd.DataFrame) -> np.ndarray:
-    """Return the per-fold accuracies of a scored table as ``(arms, folds)``."""
-    present = [column for column in FOLD_COLUMNS if column in table.columns]
-    return table[present].to_numpy(dtype=float)
+#: The one arm that is not a dominant colour descriptor at all.
+HISTOGRAM_VARIANT = "histogram_baseline"
 
 
-def paired_difference(first: np.ndarray, second: np.ndarray) -> Tuple[float, float]:
-    """Mean and standard deviation of the fold-wise difference between two arms.
+# --------------------------------------------------------------------------- #
+# Construction
+# --------------------------------------------------------------------------- #
 
-    Every arm is scored on the same folds, drawn from the same seed over the
-    same images, so the fold scores are paired and their differences carry far
-    less variance than the two accuracy figures do separately. Comparing the
-    means alone throws that pairing away and makes indistinguishable arms look
-    ordered.
+def build_dcd(config: Config, **overrides: object) -> DominantColourExtractor:
+    """Build a descriptor from ``config.json``, then apply ``overrides``.
+
+    Reading the configuration first matters more than it looks. Constructing
+    the extractor bare would silently fall back to the module defaults, so an
+    edit to ``config.json`` would move every other driver's T1 and leave this
+    one alone - the experiment would then be sweeping around a centre nobody
+    else uses, and every arm would be wrong together, which is the hardest
+    kind of wrong to notice.
+
+    Args:
+        config: The loaded configuration.
+        **overrides: Constructor arguments to replace for this variant.
+
+    Returns:
+        A configured :class:`DominantColourExtractor`.
+
+    Raises:
+        KeyError: If an override names a parameter the extractor does not take,
+            which would otherwise be silently ignored.
     """
-    difference = np.asarray(first, dtype=float) - np.asarray(second, dtype=float)
-    if difference.size < 2:
-        return float(difference.mean()) if difference.size else 0.0, 0.0
-    return float(difference.mean()), float(difference.std(ddof=1))
+    accepted = set(inspect.signature(DominantColourExtractor.__init__).parameters) - {"self"}
+    unknown = set(overrides) - accepted
+    if unknown:
+        raise KeyError(
+            f"{sorted(unknown)} are not constructor arguments of "
+            f"DominantColourExtractor; the variant table is out of date"
+        )
 
-
-def add_paired_differences(table: pd.DataFrame, reference_arm: str) -> pd.DataFrame:
-    """Attach paired fold-difference statistics against one reference arm.
-
-    ``within_noise`` is the reportable quantity: an arm whose mean fold-wise
-    difference from the reference is smaller than the standard deviation of
-    those same differences lies **inside the stated noise band**, and this
-    sweep does not distinguish it from the reference. On these data almost
-    every arm qualifies, which is the finding rather than an inconvenience.
-
-    ``paired_t`` and ``paired_p`` are recorded as a supporting note and are
-    deliberately not the claim. Two assumptions behind reading them as
-    significance both fail here. Each sweep compares many arms against one
-    reference without any correction for multiplicity, so the smallest p-value
-    among fifteen comparisons is not the p-value it appears to be. And
-    cross-validation folds share training data by construction, so the five
-    differences are not independent draws and the t statistic's reference
-    distribution does not apply. The noise band makes no distributional
-    assumption and is what the text should quote.
-    """
-    folds = fold_matrix(table)
-    if folds.size == 0 or reference_arm not in set(table.arm):
-        return table
-    reference = folds[list(table.arm).index(reference_arm)]
-
-    means, sds, within, t_stats, p_values = [], [], [], [], []
-    for row in range(len(table)):
-        mean, sd = paired_difference(folds[row], reference)
-        means.append(mean)
-        sds.append(sd)
-        within.append(bool(abs(mean) < sd) if sd > 0 else bool(mean == 0.0))
-        if sd > 0 and folds.shape[1] > 1:
-            statistic, p_value = stats.ttest_rel(folds[row], reference)
-            t_stats.append(float(statistic))
-            p_values.append(float(p_value))
-        else:
-            t_stats.append(float("nan"))
-            p_values.append(float("nan"))
-
-    out = table.copy()
-    out["reference_arm"] = reference_arm
-    out["paired_diff_mean"] = means
-    out["paired_diff_sd"] = sds
-    out["within_noise"] = within
-    # Supporting note only. See the docstring: uncorrected multiplicity and
-    # dependent folds both bar these from carrying a significance claim.
-    out["paired_t_supporting"] = t_stats
-    out["paired_p_supporting"] = p_values
-    return out
-
-
-def backfill_paired_tests(results_dir: Path, references: Dict[str, str]) -> List[Path]:
-    """Add the supporting t-test columns to tables written before they existed.
-
-    The statistics are computed from the per-fold accuracies already stored in
-    each CSV, so a backfilled table is identical to one produced by a fresh
-    run. This exists so that adding a reporting column does not require
-    re-extracting features that have not changed.
-    """
-    touched: List[Path] = []
-    for name, reference_arm in references.items():
-        path = results_dir / f"{name}.csv"
-        if not path.exists():
-            continue
-        table = pd.read_csv(path)
-        # An empty string round-trips through CSV as a missing value, so a
-        # column such as dropped_feature comes back as NaN and the backfilled
-        # table stops matching the one the runner produced. These columns are
-        # strings whose empty value is "", not absence; restoring that is what
-        # keeps the two paths identical rather than merely equivalent.
-        for column in STRING_COLUMNS:
-            if column in table.columns:
-                table[column] = table[column].fillna("").astype(str)
-        if "paired_t_supporting" in table.columns or "arm" not in table.columns:
-            continue
-        table = table.drop(columns=[c for c in
-                                    ("reference_arm", "paired_diff_mean",
-                                     "paired_diff_sd", "within_noise")
-                                    if c in table.columns])
-        add_paired_differences(table, reference_arm).to_csv(path, index=False)
-        touched.append(path)
-    return touched
+    block = {
+        key: value
+        for key, value in dict(config.t1_colour).items()
+        if key in accepted
+    }
+    block["seed"] = config.seed
+    block.update(overrides)
+    return DominantColourExtractor(**block)
 
 
 def build_extractors(config: Config) -> Dict[str, object]:
-    """Every distinct extractor configuration the five experiments need.
-
-    Deliberately a flat mapping built once. Several arms share a configuration
-    - the default descriptor is the N=4 arm of E1.2, the Lab arm of E1.3, the
-    specular-on arm of E1.4 and the A+B+C arm of E1.5 - and extracting it once
-    keeps those arms numerically identical rather than merely equivalent.
-    """
-    block = dict(getattr(config, "t1_colour", {}) or {})
-    block.pop("_comment", None)
-
-    def dominant(**overrides) -> DominantColourExtractor:
-        settings = {**block, **overrides}
-        settings.pop("histogram_bins", None)
-        return DominantColourExtractor(seed=config.seed, **settings)
-
+    """Return every extractor configuration the five experiments need."""
     extractors: Dict[str, object] = {
-        "t1_default": dominant(),
-        "histogram": ColourHistogramExtractor.from_config(config),
+        name: build_dcd(config, **overrides) for name, overrides in DCD_VARIANTS.items()
     }
-    for n_colours in (3, 5, 6):
-        extractors[f"n{n_colours}"] = dominant(n_colours=n_colours)
-    for space in ("HSV", "RGB"):
-        extractors[f"space_{space}"] = dominant(space=space)
-    extractors["specular_off"] = dominant(exclude_specular=False)
-    extractors["blocks_A"] = dominant(blocks="A")
-    extractors["blocks_AB"] = dominant(blocks="AB")
-    # E1.6. An arm, not a redefinition: the flag defaults to false in
-    # config.json, so the published descriptor is untouched and both readings
-    # of the decay index are reported side by side.
-    extractors["decay_green_excluded"] = dominant(decay_exclude_green=True)
+    extractors[HISTOGRAM_VARIANT] = ColourHistogramExtractor.from_config(config)
     return extractors
 
 
-def extract_all(
+def block_columns(extractor: DominantColourExtractor) -> Dict[str, np.ndarray]:
+    """Return the column indices of blocks A, B and C in the emitted vector.
+
+    Derived from the documented layout - ``7N`` for block A, ``N`` for B, five
+    for C - and then checked against the extractor's own
+    :attr:`~DominantColourExtractor.feature_names`, so a future change to the
+    layout fails here rather than silently mislabelling an E1.5 arm.
+    """
+    n = extractor.n_colours
+    return {
+        "A": np.arange(0, 7 * n),
+        "B": np.arange(7 * n, 8 * n),
+        "C": np.arange(8 * n, 8 * n + 5),
+    }
+
+
+def assert_block_layout(extractor: DominantColourExtractor) -> int:
+    """Check the block layout and return the decay-share column index.
+
+    Raises:
+        AssertionError: If the emitted vector is not laid out as E1.5 assumes.
+    """
+    names = list(extractor.feature_names)
+    columns = block_columns(extractor)
+    assert extractor.blocks == "ABC", (
+        f"E1.5 slices the full ABC vector; config.json has blocks={extractor.blocks!r}"
+    )
+    assert len(names) == extractor.dim == 8 * extractor.n_colours + 5, (
+        f"T1 declares {extractor.dim} dimensions and names {len(names)}"
+    )
+    assert all("centroid" in names[i] or "share" in names[i] or "variance" in names[i]
+               for i in columns["A"]), "block A is not where E1.5 expects it"
+    assert all("coherency" in names[i] for i in columns["B"]), (
+        "block B is not where E1.5 expects it"
+    )
+    decay = int(columns["C"][-1])
+    assert names[decay] == "T1_decay_share", (
+        f"the last dimension of block C is {names[decay]!r}, not T1_decay_share"
+    )
+    return decay
+
+
+# --------------------------------------------------------------------------- #
+# One shared pass
+# --------------------------------------------------------------------------- #
+
+def balanced_subset(
+    records: Sequence[ImageRecord],
+    per_class: int,
+    config: Config,
+) -> List[ImageRecord]:
+    """Draw ``per_class`` records from each class, reproducibly.
+
+    Mirrors the benchmark and T3 drivers' subset so that a pilot experiment
+    and a pilot benchmark describe the same images.
+    """
+    rng = np.random.default_rng(config.seed)
+    chosen: List[int] = []
+    for label in range(config.primary.n_classes):
+        pool = [i for i, record in enumerate(records) if record.label == label]
+        take = min(per_class, len(pool))
+        chosen.extend(int(pool[i]) for i in rng.choice(len(pool), size=take, replace=False))
+    return [records[i] for i in sorted(chosen)]
+
+
+def extract_all_variants(
     records: Sequence[ImageRecord],
     extractors: Dict[str, object],
     augment: bool,
     config: Config,
-) -> Dict[str, FeatureMatrix]:
-    """Build one feature matrix per configuration in a single pass.
+) -> Tuple[Dict[str, FeatureMatrix], int]:
+    """Build one :class:`~harness.FeatureMatrix` per variant, in a single pass.
 
     Row inclusion follows the harness exactly: a sample whose segmentation
-    failed is dropped unless a substitute mask was supplied, and group and
-    variant provenance is carried through so cross-validation can still draw
-    leakage-safe folds.
+    failed is dropped unless a substitute mask was supplied, and the group and
+    variant provenance is carried through so that
+    :func:`~evaluate.cross_validate_technique` can still draw leakage-safe
+    folds.
+
+    One thing is stricter than the T3 driver. A row is committed only once
+    **every** variant has described it: the vectors are built into a scratch
+    dictionary first, and if any extractor refuses the sample - the descriptor
+    raises when a mask has fewer pixels than it has colours to fit, so a
+    marginal mask can be describable at N=3 and not at N=6 - the row is
+    dropped from all of them. Otherwise the arms would be scored on subtly
+    different image sets and a difference in accuracy could be a difference in
+    which apples each arm was shown.
+
+    Returns:
+        The matrices, and the number of rows dropped by an extraction refusal.
     """
     vectors: Dict[str, List[np.ndarray]] = {name: [] for name in extractors}
     times: Dict[str, List[float]] = {name: [] for name in extractors}
-    warmed = {name: False for name in extractors}
+    warmed: Dict[str, bool] = {name: False for name in extractors}
 
     labels: List[int] = []
     paths: List[Path] = []
@@ -279,6 +273,7 @@ def extract_all(
     variant_ids: List[int] = []
     failures: List = []
     excluded = 0
+    refused = 0
     n_augmented = 0
 
     total = len(records) * (
@@ -298,24 +293,39 @@ def extract_all(
                 excluded += 1
                 continue
 
+        row: Dict[str, np.ndarray] = {}
+        elapsed: Dict[str, float] = {}
+        try:
+            for name, extractor in extractors.items():
+                image, mask = sample.image.copy(), sample.mask.copy()
+                if not warmed[name]:
+                    extractor(image, mask)  # Warm-up, not timed and not kept.
+                    extractor.reset_diagnostics()
+                    warmed[name] = True
+                start = time.perf_counter()
+                row[name] = extractor(image, mask)
+                elapsed[name] = time.perf_counter() - start
+        except FeatureExtractionError as error:
+            # Roll the diagnostics back to the committed length, so that the
+            # E1.4 exclusion percentages stay aligned with the matrix rows.
+            for extractor in extractors.values():
+                del extractor.diagnostics[len(labels):]
+            refused += 1
+            print(f"\n    refused {sample.record.path.name}: {error}")
+            continue
+
         labels.append(sample.label)
         paths.append(sample.record.path)
         groups.append(sample.record_index)
         variant_ids.append(sample.variant)
         if sample.is_augmented:
             n_augmented += 1
-
-        for name, extractor in extractors.items():
-            image, mask = sample.image.copy(), sample.mask.copy()
-            if not warmed[name]:
-                extractor(image, mask)  # Warm-up, not timed.
-                warmed[name] = True
-            start = time.perf_counter()
-            vectors[name].append(extractor(image, mask))
-            times[name].append(time.perf_counter() - start)
+        for name in extractors:
+            vectors[name].append(row[name])
+            times[name].append(elapsed[name])
 
     print()
-    return {
+    matrices = {
         name: FeatureMatrix(
             X=np.vstack(rows) if rows else np.empty((0, extractors[name].dim)),
             y=np.asarray(labels, dtype=np.int64),
@@ -330,82 +340,51 @@ def extract_all(
         )
         for name, rows in vectors.items()
     }
+    return matrices, refused
 
 
-def drop_feature(matrix: FeatureMatrix, names: Sequence[str], drop: str) -> FeatureMatrix:
-    """Return the matrix with one named column removed.
-
-    Removing a column here rather than adding a parameter to the extractor
-    keeps the descriptor untouched and keeps the arm on the same extraction
-    pass as its parent, so the only difference between them really is the one
-    column.
-    """
-    keep = [index for index, name in enumerate(names) if name != drop]
-    if len(keep) == len(names):
-        raise KeyError(f"{drop!r} is not among the feature names")
-    return FeatureMatrix(
-        X=matrix.X[:, keep],
-        y=matrix.y,
-        technique=f"{matrix.technique}_minus_{drop}",
-        extraction_times=matrix.extraction_times,
-        n_augmented=matrix.n_augmented,
-        failures=matrix.failures,
-        excluded=matrix.excluded,
-        paths=matrix.paths,
-        groups=matrix.groups,
-        variants=matrix.variants,
-    )
-
-
-def score(matrix: FeatureMatrix, arm: str, config: Config, **extra: object) -> dict:
+def score(
+    matrix: FeatureMatrix,
+    arm: str,
+    config: Config,
+    **extra: object,
+) -> dict:
     """Cross-validate one arm on the training partition and return its row."""
-    report = cross_validate_technique(
-        build_pipeline(config), matrix, technique=arm, config=config
-    )
-    # Per-class recall is emitted for every arm, not derived afterwards. A
-    # claim about which classes a change helps is only auditable if the
-    # per-class numbers sit in the same row as the accuracy they explain.
-    display = list(config.primary.display_names)
-    per_class = report.per_class_frame(display)
-    if not per_class.empty:
-        indexed = per_class.set_index("class")
-        recalls = {f"recall_{name}": float(indexed.loc[name, "recall"]) for name in display}
-        precisions = {f"precision_{name}": float(indexed.loc[name, "precision"]) for name in display}
-    else:
-        recalls = {f"recall_{name}": float("nan") for name in display}
-        precisions = {f"precision_{name}": float("nan") for name in display}
+    report = cross_validate_technique(build_pipeline(config), matrix, technique=arm, config=config)
     print(
-        f"    {arm:<26} dim {matrix.dim:>3}  "
+        f"    {arm:<24} dim {matrix.dim:>4}  "
         f"accuracy {report.mean_accuracy:.4f} +/- {report.std_accuracy:.4f}  "
         f"macro F1 {report.mean_macro_f1:.4f}"
     )
     # Read before the dict literal pops them: a dict literal evaluates its
-    # values in order, so looking the key up after popping it silently yields
+    # values in order, so looking a key up after popping it silently yields
     # the not-found sentinel.
     config_key = str(extra.pop("config_key", ""))
-    dropped_feature = str(extra.pop("dropped_feature", ""))
     stages = PIPELINE_STAGES.get(config_key, -1)
-    if stages < 0:
+    if config_key and stages < 0:
         raise KeyError(
-            f"PIPELINE_STAGES has no entry for {config_key!r}. The parsimony "
-            f"tie-break would silently rank this arm first; add its stage count."
+            f"PIPELINE_STAGES has no entry for {config_key!r}; the parsimony "
+            f"tie-break would silently rank this arm first."
         )
+    display = list(config.primary.display_names)
+    per_class = report.per_class_frame(display)
+    recalls = (
+        {f"recall_{n}": float(per_class.set_index("class").loc[n, "recall"]) for n in display}
+        if not per_class.empty else {f"recall_{n}": float("nan") for n in display}
+    )
 
     return {
         "arm": arm,
         "config_key": config_key,
-        "dropped_feature": dropped_feature,
+        "pipeline_stages": stages,
         "dimensionality": matrix.dim,
         "cv_mean_accuracy": report.mean_accuracy,
         "cv_std_accuracy": report.std_accuracy,
         "cv_mean_macro_f1": report.mean_macro_f1,
         "cv_std_macro_f1": report.std_macro_f1,
-        **{f"fold{i + 1}_accuracy": float(v) for i, v in enumerate(report.accuracy_folds)},
+        **{f"fold{i + 1}_accuracy": float(value) for i, value in enumerate(report.accuracy_folds)},
         **recalls,
-        **precisions,
         "extraction_mean_s": float(np.mean(matrix.extraction_times)),
-        "fit_seconds_mean": float(np.mean(report.fit_seconds)) if report.fit_seconds.size else float("nan"),
-        "pipeline_stages": stages,
         "rows": int(matrix.X.shape[0]),
         **extra,
     }
@@ -416,46 +395,68 @@ def score(matrix: FeatureMatrix, arm: str, config: Config, **extra: object) -> d
 # --------------------------------------------------------------------------- #
 
 def e1_1_baseline(matrices: Dict[str, FeatureMatrix], config: Config) -> pd.DataFrame:
-    """E1.1 - dominant colours against a colour histogram."""
-    print("\n  E1.1  representation: dominant colours vs histogram")
-    return add_paired_differences(pd.DataFrame([
-        score(matrices["t1_default"], "dominant_colour", config, config_key="t1_default",
-              representation="MPEG-7 dominant colour"),
-        score(matrices["histogram"], "colour_histogram", config, config_key="histogram",
-              representation="32-bin histogram plus moments"),
-    ]), "dominant_colour")
+    """E1.1 - the descriptor against a conventional colour histogram.
+
+    Both arms see the same images, the same masks, the same colour space and
+    the same specular exclusion. The descriptor family is the only difference,
+    which is what makes the gap attributable to it. The baseline is nearly
+    three times longer, so a win for the descriptor is a win on both axes.
+    """
+    print("\n  E1.1  descriptor against histogram baseline")
+    arms = {
+        "dcd_37": ("baseline", "MPEG-7 dominant colour"),
+        "histogram_moments_105": (HISTOGRAM_VARIANT, "32-bin histogram + colour moments"),
+    }
+    return add_paired_differences(pd.DataFrame(
+        [
+            score(matrices[key], arm, config, config_key=key, descriptor=description)
+            for arm, (key, description) in arms.items()
+        ]
+    ), "dcd_37")
 
 
 def e1_2_n_colours(matrices: Dict[str, FeatureMatrix], config: Config) -> pd.DataFrame:
-    """E1.2 - how many dominant colours.
+    """E1.2 - how many dominant colours the descriptor should carry.
 
-    Dimensionality is reported rather than equalised. Padding a shorter vector
-    would invent features the descriptor never produced, and truncating a
-    longer one would score a different descriptor from the one named.
+    The vector length changes with ``N``, so dimensionality is reported
+    alongside accuracy. Nothing is padded or truncated to make the arms
+    comparable: that the arms are *not* the same length is half the finding,
+    since a gain bought with sixteen extra dimensions is a different kind of
+    gain from a free one.
     """
     print("\n  E1.2  number of dominant colours")
-    rows = []
-    for n_colours in (3, 4, 5, 6):
-        key = "t1_default" if n_colours == 4 else f"n{n_colours}"
-        rows.append(score(matrices[key], f"N={n_colours}", config, config_key=key,
-                          n_colours=n_colours))
-    return add_paired_differences(pd.DataFrame(rows), "N=4")
+    arms = {3: "n_colours_3", 4: "baseline", 5: "n_colours_5", 6: "n_colours_6"}
+    return add_paired_differences(pd.DataFrame(
+        [
+            score(
+                matrices[key],
+                f"n_colours_{n}",
+                config,
+                config_key=key,
+                n_colours=n,
+                expected_dim=8 * n + 5,
+            )
+            for n, key in arms.items()
+        ]
+    ), "n_colours_4")
 
 
 def e1_3_space(matrices: Dict[str, FeatureMatrix], config: Config) -> pd.DataFrame:
-    """E1.3 - which colour space the clustering runs in.
+    """E1.3 - which colour space the clustering should run in.
 
-    The five derived indices are computed in CIE units whatever space the
-    clustering used, so this arm changes where the clusters land and not what
-    the indices mean.
+    Only the clustering changes. The five ripeness indices of block C are
+    computed from CIE L*a*b* whatever space was clustered in, by construction
+    in the extractor, so those five dimensions mean the same thing in all
+    three arms and the comparison is genuinely about the clustering.
     """
-    print("\n  E1.3  clustering space")
-    rows = [score(matrices["t1_default"], "space=LAB", config,
-                  config_key="t1_default", space="LAB")]
-    for space in ("HSV", "RGB"):
-        rows.append(score(matrices[f"space_{space}"], f"space={space}", config,
-                          config_key=f"space_{space}", space=space))
-    return add_paired_differences(pd.DataFrame(rows), "space=LAB")
+    print("\n  E1.3  clustering colour space")
+    arms = {"LAB": "baseline", "HSV": "space_hsv", "RGB": "space_rgb"}
+    return add_paired_differences(pd.DataFrame(
+        [
+            score(matrices[key], f"space_{space.lower()}", config, config_key=key, space=space)
+            for space, key in arms.items()
+        ]
+    ), "space_lab")
 
 
 def e1_4_specular(
@@ -463,50 +464,135 @@ def e1_4_specular(
     extractors: Dict[str, object],
     config: Config,
 ) -> pd.DataFrame:
-    """E1.4 - whether specular highlights are excluded before clustering.
+    """E1.4 - whether excluding specular highlights helps.
 
-    The mean fraction of masked pixels removed is reported alongside the
-    accuracy. Without it a null result is unreadable: exclusion that changes
-    nothing because it fired on almost no pixels is a different finding from
-    exclusion that removed a tenth of the fruit and still changed nothing.
+    The accuracy difference alone is uninterpretable without knowing how much
+    was thrown away to get it, so the share of masked pixels each arm dropped
+    is reported beside it. Two numbers make the result readable:
+
+    * ``mean_pct_pixels_excluded`` - what the arm actually discarded. Zero for
+      the disabled arm by construction.
+    * ``pct_images_specular_fallback`` - how often exclusion was abandoned
+      because it would have left too few pixels to cluster. A large value here
+      means the enabled arm is quietly behaving like the disabled one on part
+      of the dataset, and the accuracy gap understates the true effect.
     """
-    print("\n  E1.4  specular highlight exclusion")
+    print("\n  E1.4  specular exclusion")
+    arms = {"specular_on": "baseline", "specular_off": "specular_off"}
     rows = []
-    for arm, key in (("specular=on", "t1_default"), ("specular=off", "specular_off")):
-        diagnostics = getattr(extractors[key], "diagnostics", [])
-        excluded = [d.specular_fraction for d in diagnostics]
-        fallbacks = [d.specular_fallback for d in diagnostics]
-        rows.append(score(
-            matrices[key], arm, config, config_key=key,
-            mean_pixels_excluded_pct=100.0 * float(np.mean(excluded)) if excluded else 0.0,
-            max_pixels_excluded_pct=100.0 * float(np.max(excluded)) if excluded else 0.0,
-            fallback_images=int(np.sum(fallbacks)) if fallbacks else 0,
-        ))
-    return add_paired_differences(pd.DataFrame(rows), "specular=on")
+    for arm, key in arms.items():
+        diagnostics = extractors[key].diagnostics
+        matrix = matrices[key]
+        if len(diagnostics) != matrix.X.shape[0]:
+            raise AssertionError(
+                f"{key}: {len(diagnostics)} diagnostics for {matrix.X.shape[0]} rows; "
+                f"the two must be row-aligned for these percentages to mean anything"
+            )
+        fractions = np.asarray([d.specular_fraction for d in diagnostics], dtype=np.float64)
+        fallbacks = np.asarray([d.specular_fallback for d in diagnostics], dtype=bool)
+        excluded = np.where(fallbacks, 0.0, fractions)
+        rows.append(
+            score(
+                matrix,
+                arm,
+                config,
+                config_key=key,
+                exclude_specular=(key == "baseline"),
+                mean_pct_pixels_excluded=float(np.mean(excluded) * 100.0),
+                max_pct_pixels_excluded=float(np.max(excluded, initial=0.0) * 100.0),
+                mean_pct_pixels_flagged_specular=float(np.mean(fractions) * 100.0),
+                pct_images_specular_fallback=float(np.mean(fallbacks) * 100.0),
+                mean_analysis_pixels=float(np.mean([d.analysis_pixels for d in diagnostics])),
+            )
+        )
+    return add_paired_differences(pd.DataFrame(rows), "specular_on")
 
 
-def e1_5_blocks(matrices: Dict[str, FeatureMatrix], config: Config) -> pd.DataFrame:
-    """E1.5 - which blocks of the descriptor carry the signal.
+def e1_5_blocks(
+    matrices: Dict[str, FeatureMatrix],
+    extractors: Dict[str, object],
+    config: Config,
+) -> pd.DataFrame:
+    """E1.5 - what each block of the descriptor contributes.
 
-    The final arm removes the decay share from the complete descriptor. On
-    held-out exemplars that index reads 26.5% on an unripe apple and 0.0% on a
-    rotten one, inverted from its design: a dark, low-chroma green cluster
-    satisfies both its chroma and lightness bounds, so it is detecting shadow
-    on green peel rather than decay. This arm measures what carrying it costs.
+    Four arms, the last of which is not in the original specification:
+
+    ``A_only``
+        The 28 dominant-colour dimensions alone.
+    ``AB``
+        Plus the four spatial coherency dimensions.
+    ``ABC_full``
+        Plus the five ripeness indices. The descriptor as it ships.
+    ``ABC_minus_decay``
+        The full vector with ``T1_decay_share`` removed, 36 dimensions.
+
+    The fourth arm exists because the decay index appears to be inverted on
+    held-out exemplars: it reads 26.5% on an Unripe apple and 0.0% on a Rotten
+    one. The suspected mechanism is that the index tests a cluster for low
+    chroma **and** low lightness, and a dark, low-chroma green cluster
+    (L* 14.7, a* -10.4, b* 10.3) satisfies both - so on a green apple in
+    shadow the index is detecting the shadow, not decay.
+
+    This arm does not fix that. It measures whether the dimension is
+    contributing signal or noise, which is the question that has to be
+    answered before anyone changes the thresholds. If removing it costs
+    nothing, the dimension is not doing the job it is named for; if removing
+    it costs accuracy, it is carrying something real under a misleading name.
+    Either way the number is reported as it comes out.
     """
     print("\n  E1.5  block ablation")
-    full = matrices["t1_default"]
-    names = list(build_extractors(config)["t1_default"].feature_names)
-    rows = [
-        score(matrices["blocks_A"], "A (clusters)", config, config_key="blocks_A", blocks="A"),
-        score(matrices["blocks_AB"], "A+B (with coherency)", config, config_key="blocks_AB",
-              blocks="AB"),
-        score(full, "A+B+C (complete)", config, config_key="t1_default", blocks="ABC"),
-        score(drop_feature(full, names, DECAY_FEATURE), "A+B+C minus decay share",
-              config, config_key="t1_default", dropped_feature=DECAY_FEATURE,
-              blocks="ABC-decay"),
-    ]
-    return add_paired_differences(pd.DataFrame(rows), "A+B+C (complete)")
+    full = matrices["baseline"]
+    extractor = extractors["baseline"]
+    columns = block_columns(extractor)
+    decay = assert_block_layout(extractor)
+
+    ab = np.concatenate([columns["A"], columns["B"]])
+    abc = np.arange(full.dim)
+    arms = {
+        "A_only": (columns["A"], "A", "dominant colours"),
+        "AB": (ab, "AB", "adds spatial coherency"),
+        "ABC_full": (abc, "ABC", "adds the five ripeness indices"),
+        "ABC_minus_decay": (
+            np.delete(abc, decay),
+            "ABC-decay",
+            "full vector without T1_decay_share",
+        ),
+    }
+    names = list(extractor.feature_names)
+    return add_paired_differences(pd.DataFrame(
+        [
+            score(
+                replace(full, X=full.X[:, selected], technique=arm),
+                arm,
+                config,
+                config_key="baseline",
+                blocks=label,
+                description=description,
+                dropped_feature="T1_decay_share" if arm == "ABC_minus_decay" else "",
+                first_feature=names[int(selected[0])],
+                last_feature=names[int(selected[-1])],
+            )
+            for arm, (selected, label, description) in arms.items()
+        ]
+    ), "ABC_full")
+
+
+PREDICTION_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "results" / "predictions" / "e1_6_decay_green_exclusion.txt"
+)
+
+
+def prediction_digest() -> str:
+    """SHA-256 of the recorded prediction, or a marker if it is absent.
+
+    Carried in the E1.6 rows so that "the prediction preceded the result" is
+    checkable rather than asserted: the file cannot be edited afterwards
+    without the recorded digest ceasing to match.
+    """
+    if not PREDICTION_FILE.exists():
+        return "ABSENT"
+    return hashlib.sha256(PREDICTION_FILE.read_bytes()).hexdigest()
 
 
 def e1_6_decay_green_exclusion(
@@ -516,68 +602,56 @@ def e1_6_decay_green_exclusion(
     """E1.6 - removing shadowed green peel from the decay index.
 
     The decay index counts clusters that are dark and weakly chromatic.
-    Shadowed green peel satisfies both, so on unripe fruit the index counts
-    shade as decay: measured over 590 training images it reads 10.97 on
-    Unripe against 12.97 on Rotten, and 93.7% of the Unripe reading is
-    removed by additionally requiring the cluster to be non-green, while
-    Rotten loses exactly none of its own.
+    Shadowed green peel satisfies both, so on unripe fruit it counts shade as
+    decay. Measured over 590 training images through the extractor itself,
+    requiring the cluster also to be non-green removes 93.7% of the Unripe
+    reading and exactly none of the Rotten one - the result the mechanism
+    predicts, since real decay is brown and never green.
 
-    This arm is not evidence that the index is inverted. Across the
-    population it already orders the classes correctly, Rotten highest; the
-    inversion reported on two held-out exemplars does not generalise. What is
-    real is the contamination, and this measures what removing it is worth.
+    This arm is not evidence that the index is inverted. Across the population
+    it already orders the classes correctly, reading 10.97 on Unripe, 7.75 on
+    Ripe and 12.97 on Rotten; the inversion reported on two held-out exemplars
+    does not generalise. What is real is the contamination, and this measures
+    what removing it is worth.
 
-    The prediction for this arm was recorded before it was run, in
-    results/predictions/e1_6_decay_green_exclusion.txt: a gain of about +0.3
-    points, plausibly nothing at all, because T1_green_share already
-    identifies unripe fruit and the classifier can discount an inflated decay
-    reading from it. A flat result is a redundancy finding, not a failure.
-
-    The prediction is left exactly as recorded, and its digest travels in the
-    result row. It is judged in the paired frame, on the same tie band as
-    every other arm: an unpaired reading of this arm against an ostensibly
-    paired reading of the others would not be comparing like with like, and
-    the falsifiable check on where any gain lands would be meaningless.
+    The prediction was recorded before the arm was run, and is judged in the
+    same paired frame as every other arm. A flat result is a redundancy
+    finding - T1_green_share already identifies unripe fruit - not a failure.
     """
     print("\n  E1.6  decay index with shadowed green peel excluded")
     digest = prediction_digest()
     print(f"    prediction on file, sha256 {digest[:16]}...")
     return add_paired_differences(pd.DataFrame([
-        score(matrices["t1_default"], "decay as published", config,
-              config_key="t1_default", decay_exclude_green=False,
+        score(matrices["baseline"], "decay_as_published", config,
+              config_key="baseline", decay_exclude_green=False,
               prediction_sha256=digest),
-        score(matrices["decay_green_excluded"], "decay excluding green", config,
+        score(matrices["decay_green_excluded"], "decay_excluding_green", config,
               config_key="decay_green_excluded", decay_exclude_green=True,
               prediction_sha256=digest),
-    ]), "decay as published")
+    ]), "decay_as_published")
 
 
 def e1_6_sample_sensitivity(
     matrices: Dict[str, FeatureMatrix],
+    extractors: Dict[str, object],
     config: Config,
     draws: int = 400,
 ) -> pd.DataFrame:
-    """How the decay index's apparent strength depends on how many images you look at.
+    """How the decay index's apparent strength depends on the sample size.
 
-    This is a finding, not a caveat. Measured at 60 images per class the decay
-    index separates Rotten from Unripe by 1.86x; at 200 per class the same
-    quantity reads 1.18x; and the full training partition is larger still. The
-    dimension does not weaken - the small-sample estimate was optimistic, and
-    an experiment that stopped at sixty images would have reported an effect
-    roughly half again as large as the one that is there.
+    A finding rather than a caveat. The same quantity reads very differently
+    at different sample sizes, so an experiment that stopped early would have
+    reported an effect substantially larger than the one that is there.
 
     The resampling is free: every training image's decay value is already in
     the extracted matrix, so subsets are drawn from those values rather than
     re-extracted. Draws are without replacement within each class, which makes
     this the sampling distribution of the ratio under the study's own design
     rather than a bootstrap approximation to it.
-
-    A ratio is undefined when a draw's Unripe mean is zero, which cannot
-    happen here but is guarded anyway; such draws are excluded and counted.
     """
-    names = list(build_extractors(config)["t1_default"].feature_names)
-    decay = matrices["t1_default"].X[:, names.index(DECAY_FEATURE)]
-    labels = matrices["t1_default"].y
+    names = list(extractors["baseline"].feature_names)
+    decay = matrices["baseline"].X[:, names.index("T1_decay_share")]
+    labels = matrices["baseline"].y
     display = list(config.primary.display_names)
     unripe = decay[labels == display.index("Unripe")]
     rotten = decay[labels == display.index("Rotten")]
@@ -585,7 +659,7 @@ def e1_6_sample_sensitivity(
     print("\n  E1.6b sample-size sensitivity of the decay separation")
     rng = np.random.default_rng(config.seed)
     rows = []
-    smallest = min(unripe.size, rotten.size)
+    smallest = int(min(unripe.size, rotten.size))
     for per_class in (30, 45, 60, 100, 200, 400, smallest):
         if per_class > smallest:
             continue
@@ -595,179 +669,62 @@ def e1_6_sample_sensitivity(
             r = rng.choice(rotten, size=per_class, replace=False).mean()
             if u > 0:
                 ratios.append(r / u)
-        ratios = np.asarray(ratios, dtype=np.float64)
+        values = np.asarray(ratios, dtype=np.float64)
         rows.append({
             "images_per_class": int(per_class),
-            "draws": int(ratios.size),
-            "ratio_rotten_over_unripe_mean": float(ratios.mean()),
-            "ratio_sd": float(ratios.std(ddof=1)) if ratios.size > 1 else 0.0,
-            "ratio_p05": float(np.percentile(ratios, 5)),
-            "ratio_p95": float(np.percentile(ratios, 95)),
+            "draws": int(values.size),
+            "ratio_rotten_over_unripe_mean": float(values.mean()),
+            "ratio_sd": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+            "ratio_p05": float(np.percentile(values, 5)),
+            "ratio_p95": float(np.percentile(values, 95)),
             "unripe_decay_mean": float(unripe.mean()),
             "rotten_decay_mean": float(rotten.mean()),
             "is_full_partition": bool(per_class == smallest),
         })
-        print(f"    {per_class:>4} per class   ratio {ratios.mean():.2f}"
-              f"  (5th-95th {np.percentile(ratios, 5):.2f}-{np.percentile(ratios, 95):.2f})")
+        print(f"    {per_class:>4} per class   ratio {values.mean():.2f}"
+              f"  (5th-95th {np.percentile(values, 5):.2f}-{np.percentile(values, 95):.2f})")
     return pd.DataFrame(rows)
-
-
-#: The threshold the supporting t-test would be read at, if it were the
-#: claim. It is not; it is recorded so the report can state exactly how often
-#: the two criteria would disagree, and where.
-SUPPORTING_ALPHA = 0.05
-
-
-def criterion_agreement(tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Count where the noise band and the supporting t-test would disagree.
-
-    Chapter 4 needs this stated rather than left in a column. If the two
-    criteria agreed everywhere, the choice between them would not matter and
-    fixing one in advance would be an empty precaution. They do not agree
-    everywhere, and the single arm on which they part company sits at
-    p = 0.0517 - close enough to the conventional cliff that the verdict is
-    decided by the threshold rather than by the data. That is the concrete
-    case for having chosen the criterion before seeing it.
-
-    The reference arm of each table is excluded: its difference from itself is
-    zero by construction and has no t statistic.
-    """
-    rows = []
-    for name, table in tables.items():
-        if "within_noise" not in table.columns:
-            continue
-        for row in table.itertuples():
-            if row.arm == row.reference_arm:
-                continue
-            p_value = float(getattr(row, "paired_p_supporting", float("nan")))
-            band_says = not bool(row.within_noise)
-            test_says = bool(p_value < SUPPORTING_ALPHA) if p_value == p_value else band_says
-            rows.append({
-                "table": name,
-                "arm": row.arm,
-                "reference_arm": row.reference_arm,
-                "paired_diff_mean": float(row.paired_diff_mean),
-                "paired_diff_sd": float(row.paired_diff_sd),
-                "band_distinguishes": band_says,
-                "test_distinguishes": test_says,
-                "paired_p_supporting": p_value,
-                "criteria_agree": bool(band_says == test_says),
-            })
-    return pd.DataFrame(rows)
-
-
-def report_criterion_agreement(agreement: pd.DataFrame) -> str:
-    """One-paragraph summary of the agreement table, for the console and file."""
-    if agreement.empty:
-        return "No comparisons to summarise."
-    total = len(agreement)
-    agree = int(agreement.criteria_agree.sum())
-    lines = [
-        f"Noise band against the supporting t-test at alpha {SUPPORTING_ALPHA}:",
-        f"  {agree} of {total} comparisons agree.",
-    ]
-    for row in agreement[~agreement.criteria_agree].itertuples():
-        lines.append(
-            f"  disagreement: {row.arm} vs {row.reference_arm} - "
-            f"band {'distinguishes' if row.band_distinguishes else 'does not'}, "
-            f"test {'distinguishes' if row.test_distinguishes else 'does not'} "
-            f"(p = {row.paired_p_supporting:.4f}, "
-            f"diff {row.paired_diff_mean * 100:.2f} pp, "
-            f"sd {row.paired_diff_sd * 100:.2f} pp)"
-        )
-    if agree < total:
-        lines.append(
-            "  The criterion was fixed before these were computed. The band is "
-            "the claim; the t-test is a supporting note."
-        )
-    return "\n".join(lines)
-
-
-def select_winner(combined: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame, str]:
-    """Choose the arm to spend the single test evaluation on.
-
-    Selecting on mean accuracy alone selects on noise. Every comparison in
-    this sweep sits inside its own fold spread, so the top-ranked arm is
-    frequently ahead by less than the run-to-run variation that produced the
-    ranking, and spending the one held-out evaluation on a margin of a few
-    thousandths would report a distinction the data does not contain.
-
-    Two arms are treated as tied when the mean of their paired fold-wise
-    differences lies inside the stated noise band - smaller than the standard
-    deviation of those same differences. The pairing matters: the arms share
-    folds, seed and images, so the difference is far less variable than either
-    accuracy alone.
-
-    This is deliberately a band and not a hypothesis test. Each sweep compares
-    many arms against one leader with no correction for multiplicity, and
-    cross-validation folds share training rows so the per-fold differences are
-    not independent. A band makes neither assumption.
-
-    Among the tied set the choice is parsimony - fewest dimensions, then
-    fewest image-processing stages, then arm name for determinism. A shorter
-    descriptor that cannot be distinguished from a longer one is the better
-    result, and choosing it makes the report defend the weaker claim rather
-    than the stronger one.
-
-    Returns the winning row, the tied set, and how the choice was made.
-    """
-    folds = fold_matrix(combined)
-    leader = int(combined.cv_mean_accuracy.idxmax())
-    leader_folds = folds[leader]
-
-    tied_rows = []
-    for row in range(len(combined)):
-        mean, sd = paired_difference(leader_folds, folds[row])
-        if row == leader or (sd > 0 and abs(mean) < sd) or mean == 0.0:
-            tied_rows.append(row)
-
-    tied = combined.iloc[tied_rows].copy()
-    ordered = tied.sort_values(
-        ["dimensionality", "pipeline_stages", "arm"], ascending=[True, True, True]
-    )
-    winner = ordered.iloc[0]
-    selected_by = "accuracy" if winner.arm == combined.iloc[leader].arm else "parsimony"
-    return winner, tied, selected_by
 
 
 def evaluate_winner(
     tables: Dict[str, pd.DataFrame],
-    train_matrices: Dict[str, FeatureMatrix],
+    matrices: Dict[str, FeatureMatrix],
     extractors: Dict[str, object],
     partition,
     config: Config,
 ) -> pd.DataFrame:
-    """Score the single winning arm on the test partition, once.
+    """Score the parsimony-selected arm on the test partition, once.
 
-    The only place in E1 that touches held-out data, and it runs after every
-    table above is closed. The sweep selects; this reports. Scoring more than
-    one arm here would turn the test partition into a second selection stage.
+    This is a **final confirmation, not a selection criterion**. Selection is
+    done entirely on cross-validation over the training partition using the
+    tie band, and by the time this runs every table is closed and the winner
+    is already fixed. Chapter 4 needs one held-out number and one is what this
+    produces: arms_scored_on_test records that exactly one arm was evaluated,
+    so a reader can confirm the test split chose nothing.
     """
-    combined = pd.concat(
-        [table for name, table in tables.items() if "arm" in table.columns],
-        ignore_index=True,
-    ).drop_duplicates(subset=["arm"]).reset_index(drop=True)
-
+    combined = (
+        pd.concat([t for t in tables.values() if "arm" in t.columns], ignore_index=True)
+        .drop_duplicates(subset=["arm"]).reset_index(drop=True)
+    )
     winner, tied, selected_by = select_winner(combined)
     leader = combined.loc[combined.cv_mean_accuracy.idxmax()]
-    key = str(winner.config_key)
-    dropped = str(winner.dropped_feature) if winner.dropped_feature else ""
+    key = str(winner.config_key) or "baseline"
+    dropped = str(getattr(winner, "dropped_feature", "") or "")
 
     print("\n  Closing evaluation - one arm, one pass over the test partition")
     print(f"    highest accuracy  : {leader.arm} (cv {leader.cv_mean_accuracy:.4f})")
-    print(f"    tied with it      : {len(tied)} of {len(combined)} arms, "
-          f"by paired fold differences")
-    print(f"    selected          : {winner.arm} "
-          f"(dim {int(winner.dimensionality)}, {int(winner.pipeline_stages)} stages) "
+    print(f"    tied with it      : {len(tied)} of {len(combined)} arms")
+    print(f"    selected          : {winner.arm} (dim {int(winner.dimensionality)}) "
           f"by {selected_by}")
     print(f"    extracting test features for {key} only ...")
 
-    test = extract_all(partition.test, {key: extractors[key]}, False, config)[key]
-    train = train_matrices[key]
+    test = extract_all_variants(partition.test, {key: extractors[key]}, False, config)[key]
+    train = matrices[key]
     if dropped:
         names = list(extractors[key].feature_names)
-        train = drop_feature(train, names, dropped)
-        test = drop_feature(test, names, dropped)
+        keep = [i for i, n in enumerate(names) if n != dropped]
+        train = replace(train, X=train.X[:, keep])
+        test = replace(test, X=test.X[:, keep])
 
     fitted = build_pipeline(config).fit(train.X, train.y)
     report = classification_metrics(
@@ -775,104 +732,147 @@ def evaluate_winner(
         technique=str(winner.arm),
     )
     print_report(report)
-
-    per_class = report.per_class.set_index(report.per_class.index)
     return pd.DataFrame([{
         "arm": winner.arm,
         "config_key": key,
         "dropped_feature": dropped,
         "selected_by": selected_by,
         "dimensionality": int(winner.dimensionality),
-        "pipeline_stages": int(winner.pipeline_stages),
         "highest_accuracy_arm": leader.arm,
         "highest_accuracy_cv": float(leader.cv_mean_accuracy),
         "winner_cv_accuracy": float(winner.cv_mean_accuracy),
-        "margin_over_selected": float(leader.cv_mean_accuracy - winner.cv_mean_accuracy),
         "arms_tied_with_leader": int(len(tied)),
         "arms_compared": int(len(combined)),
         "arms_scored_on_test": 1,
         "test_accuracy": report.accuracy,
         "test_macro_f1": report.macro_f1,
-        "test_weighted_f1": report.weighted_f1,
         "test_rows": int(test.X.shape[0]),
-        "selected_on": "5-fold CV over the training partition, tie band then parsimony",
+        "role": "final confirmation; selection was done on CV with the tie band",
     }])
 
 
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the five E1 experiments on one segmentation pass."""
     config = get_config()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--per-class", type=int, default=0,
                         help="Images per class; 0 uses the whole dataset.")
-    parser.add_argument("--augment", action="store_true",
-                        help="Augment the training partition, as the benchmark does.")
+    parser.add_argument("--augment", dest="augment", action="store_true",
+                        help="Apply the training augmentation plan. Roughly four times slower.")
+    parser.add_argument("--no-augment", dest="augment", action="store_false",
+                        help="The default; accepted so the documented smoke command runs.")
     parser.add_argument("--tag", default="e1",
                         help="Sub-directory of results/ to write into.")
+    parser.set_defaults(augment=False)
     args = parser.parse_args(argv)
 
     set_global_seed(config)
     records = load_primary(config)
     if args.per_class:
         records = balanced_subset(records, args.per_class, config)
+
+    # The test split is drawn and then deliberately never touched again.
     partition = stratified_split(records, config)
+    training = partition.train
+
+    # Only a reduced image count makes a run a pilot. Augmentation is off by
+    # default here, matching run_t3_experiments.py: these experiments tune the
+    # descriptor against real images, and calling that "reduced data" would
+    # misdescribe it.
+    mode = "PILOT" if args.per_class else "FULL"
     extractors = build_extractors(config)
 
     print("=" * 74)
-    print("E1 sub-experiments - MPEG-7 dominant colour descriptor")
+    print(f"T1 internal experiments - {mode}")
     print("=" * 74)
     print(f"  images          : {len(records)} ({args.per_class or 'all'} per class)")
-    print(f"  scored on       : {len(partition.train)} training images, "
-          f"5-fold CV; test partition untouched")
+    print(f"  training rows   : {len(training)}  (test split of {len(partition.test)} untouched)")
     print(f"  augmentation    : {'on' if args.augment else 'OFF'}")
-    print(f"  configurations  : {len(extractors)}, one segmentation pass")
-    print()
+    print(f"  variants        : {len(extractors)} extractor configurations, one segmentation pass")
+    print(f"  cross-validation: {config.partition.cv_folds}-fold stratified, training partition only")
+    if mode == "PILOT":
+        print(f"  NOTE            : {args.per_class} images per class, not the full set. "
+              f"Indicative only.")
 
-    matrices = extract_all(partition.train, extractors, args.augment, config)
+    # Fail before the expensive pass if E1.5 cannot slice what it needs.
+    assert_block_layout(extractors["baseline"])
 
+    print("\n  Building features ...")
+    started = time.perf_counter()
+    matrices, refused = extract_all_variants(training, extractors, args.augment, config)
+    elapsed = time.perf_counter() - started
+    baseline = matrices["baseline"]
+    print(f"  {baseline.X.shape[0]} rows x {len(extractors)} variants in {elapsed:.1f}s "
+          f"({baseline.excluded} excluded by segmentation failure, "
+          f"{refused} by extraction refusal)")
+
+    output = config.paths.results_subdir(args.tag)
     tables = {
-        "e1_1": e1_1_baseline(matrices, config),
-        "e1_2": e1_2_n_colours(matrices, config),
-        "e1_3": e1_3_space(matrices, config),
-        "e1_4": e1_4_specular(matrices, extractors, config),
-        "e1_5": e1_5_blocks(matrices, config),
-        "e1_6": e1_6_decay_green_exclusion(matrices, config),
-        "e1_6b_sample_sensitivity": e1_6_sample_sensitivity(matrices, config),
+        "e1_1.csv": e1_1_baseline(matrices, config),
+        "e1_2.csv": e1_2_n_colours(matrices, config),
+        "e1_3.csv": e1_3_space(matrices, config),
+        "e1_4.csv": e1_4_specular(matrices, extractors, config),
+        "e1_5.csv": e1_5_blocks(matrices, extractors, config),
+        "e1_6.csv": e1_6_decay_green_exclusion(matrices, config),
+        "e1_6b_sample_sensitivity.csv": e1_6_sample_sensitivity(matrices, extractors, config),
     }
-
-    final = evaluate_winner(tables, matrices, extractors, partition, config)
-    agreement = criterion_agreement(tables)
+    comparisons = {k: v for k, v in tables.items() if "arm" in v.columns}
+    final = evaluate_winner(comparisons, matrices, extractors, partition, config)
+    agreement = criterion_agreement(comparisons)
     print()
     print(report_criterion_agreement(agreement))
 
-    output = config.paths.results_subdir(args.tag)
-    for name, table in tables.items():
-        save_dataframe(table, output / f"{name}.csv", index=False)
+    for filename, frame in tables.items():
+        save_dataframe(frame.set_index("arm") if "arm" in frame.columns else frame,
+                       output / filename)
     save_dataframe(final, output / "e1_final_test.csv", index=False)
     save_dataframe(agreement, output / "criterion_agreement.csv", index=False)
     (output / "criterion_agreement.txt").write_text(
-        report_criterion_agreement(agreement) + "\n", encoding="utf-8"
-    )
+        report_criterion_agreement(agreement) + "\n", encoding="utf-8")
 
-    (output / "run_metadata.json").write_text(
-        json.dumps(
-            {
-                "per_class": args.per_class or "all",
-                "augmentation": args.augment,
-                "n_images": len(records),
-                "n_train_images": len(partition.train),
-                "scored_partition": "train (5-fold CV)",
-                "test_partition_used_for": "one closing evaluation of the winning arm",
-                "seed": config.seed,
-                "segmentation_method": config.segmentation.method,
-                "configurations": sorted(extractors),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    # The configuration that produced these numbers travels with them.
+    log = {
+        "mode": mode,
+        "seed": config.seed,
+        "per_class": args.per_class or None,
+        "augmented": args.augment,
+        "n_images": len(records),
+        "n_training_records": len(training),
+        "n_training_rows": int(baseline.X.shape[0]),
+        "n_excluded_by_segmentation": int(baseline.excluded),
+        "n_refused_by_extraction": int(refused),
+        "cv_folds": config.partition.cv_folds,
+        "test_split_touched": False,
+        "dataset_root": str(config.paths.primary_root),
+        "dataset_audit_verdict": "NOT SUITABLE - see README; 74.0% background-only "
+                                 "against a 33.3% chance level. Relative comparisons "
+                                 "between these arms are unaffected; absolute "
+                                 "accuracies carry that ceiling.",
+        "segmentation_method": config.segmentation.method,
+        "t1_config": {k: v for k, v in dict(config.t1_colour).items() if k != "_comment"},
+        "dcd_variants": DCD_VARIANTS,
+        "histogram_baseline": {
+            "bins": extractors[HISTOGRAM_VARIANT].bins,
+            "space": extractors[HISTOGRAM_VARIANT].space,
+            "exclude_specular": extractors[HISTOGRAM_VARIANT].exclude_specular,
+            "dim": extractors[HISTOGRAM_VARIANT].dim,
+        },
+        "e1_5_note": "ABC_minus_decay is an addition to the original specification: "
+                     "T1_decay_share reads 26.5% on an Unripe exemplar and 0.0% on a "
+                     "Rotten one, consistent with a dark low-chroma green cluster "
+                     "satisfying its low-chroma-low-lightness test. The arm measures "
+                     "the dimension's contribution; it does not change it.",
+        "elapsed_seconds": round(elapsed, 1),
+    }
+    (output / "run_config.json").write_text(json.dumps(log, indent=2), encoding="utf-8")
 
-    print(f"\n  written to {output}")
+    print(f"\n  Written to {output}:")
+    for filename in tables:
+        print(f"    {filename}")
+    print("    run_config.json")
     return 0
 
 

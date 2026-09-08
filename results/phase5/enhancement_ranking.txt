@@ -1,0 +1,14 @@
+Ranking by cross-validated accuracy (5-fold, training partition):
+  1. E2     0.9374 +/- 0.0126  test acc 0.9744
+  2. E1     0.9236 +/- 0.0132  test acc 0.9530
+  3. E3     0.9115 +/- 0.0099  test acc 0.9530
+  4. T1     0.9046 +/- 0.0100  test acc 0.9487
+  5. T3     0.7588 +/- 0.0226  test acc 0.7692
+  6. T2     0.6235 +/- 0.0309  test acc 0.6132
+
+Best technique: E2 (+0.0138 over E1, paired t = 2.001, p = 0.1160, Holm p = 0.2555) -> NOT significant at alpha = 0.05
+  The top two sit inside each other's fold-to-fold spread. E2 leads, but the data does not support calling it the winner.
+
+Target (>= 80% for the best individual technique): T1 at 0.9046 clears it.
+  E2 ranks higher at 0.9374, but it is an enhancement, not an individual technique, so it is not what this target is set against.
+Background-only control: 0.7396. T1 is +0.1650 relative to a classifier that never sees the fruit.

@@ -23,7 +23,7 @@ for candidate in (PROJECT_ROOT, SCRIPTS):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from run_e1_experiments import (  # noqa: E402
+from selection import (  # noqa: E402
     SUPPORTING_ALPHA,
     add_paired_differences,
     backfill_paired_tests,

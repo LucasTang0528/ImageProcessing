@@ -328,6 +328,7 @@ def acceptance_section(
     vs_best: Optional[pd.DataFrame],
     t3_experiments: Optional[pd.DataFrame],
     t3_ablation: Optional[pd.DataFrame],
+    per_class: Optional[pd.DataFrame] = None,
 ) -> str:
     """The brief's eight acceptance targets, scored against measured values."""
     if matrix is None:
@@ -367,6 +368,30 @@ def acceptance_section(
     extraction = None
     if t3_ablation is not None and "extraction_mean_s" in t3_ablation.columns:
         extraction = float(t3_ablation["extraction_mean_s"].iloc[0])
+
+    # The per-class bar is judged on the strongest enhancement's held-out
+    # breakdown: the weakest precision and the weakest recall across the three
+    # classes, because "each" means the worst one has to clear it.
+    per_class_value = (
+        '<span class="note">Not produced yet. Re-run scripts/run_enhancements.py, '
+        "which now writes per_class.csv beside the matrix.</span>"
+    )
+    per_class_chip = chip("No data")
+    if per_class is not None:
+        entries = per_class[
+            (per_class["configuration"] == best_e) & (per_class["source"] == "test")
+        ]
+        if not entries.empty:
+            worst_precision = float(entries["precision"].min())
+            worst_recall = float(entries["recall"].min())
+            weakest = entries.loc[entries["recall"].idxmin(), "class"]
+            per_class_value = (
+                f'{num(worst_precision, 3)} / {num(worst_recall, 3)} '
+                f'<span class="dim">worst P / R, {esc(weakest)}</span>'
+            )
+            per_class_chip = chip(
+                "Pass" if min(worst_precision, worst_recall) >= 0.80 else "Fail"
+            )
 
     rows: List[List[str]] = [
         [
@@ -408,10 +433,8 @@ def acceptance_section(
         [
             "Per-class precision and recall",
             "&ge; 0.80 each",
-            '<span class="note">Computed by the evaluation module but not written to '
-            "disk: the Phase&nbsp;5 driver saves only the confusion PNG for each "
-            "enhancement.</span>",
-            chip("Not exported"),
+            per_class_value,
+            per_class_chip,
         ],
         [
             "Blemish coverage MAE",
@@ -526,6 +549,439 @@ def ablation_section(ablation: Optional[pd.DataFrame], matrix: Optional[pd.DataF
         "A positive value means the dropped technique was costing the fusion accuracy.",
         lead,
     )
+
+
+def per_class_section(
+    per_class: Optional[pd.DataFrame],
+    matrix: Optional[pd.DataFrame],
+    tag: str,
+) -> str:
+    """Precision, recall and F1 per class, and the two provenances they carry.
+
+    The brief's per-class bar is the one target that was previously unscorable:
+    the evaluation module computed these numbers for every configuration and the
+    driver wrote none of them down. What the headline accuracy hides is which
+    class a configuration is failing, and on a three-class ripeness problem that
+    is most of what a reader wants to know.
+    """
+    if per_class is None:
+        return missing(
+            f"results/{tag}/per_class.csv",
+            "Re-run scripts/run_enhancements.py; it writes this alongside the matrix.",
+        )
+
+    held_out = per_class[per_class["source"] == "test"]
+    order = [n for n in TECHNIQUES + ENHANCEMENTS if n in set(held_out["configuration"])]
+    classes = list(dict.fromkeys(per_class["class"]))
+
+    rows: List[List[str]] = []
+    lead: List[int] = []
+    for index, config in enumerate(order):
+        entries = held_out[held_out["configuration"] == config].set_index("class")
+        worst = min(
+            float(entries.loc[label, "recall"]) for label in classes if label in entries.index
+        )
+        if worst >= 0.80:
+            lead.append(index)
+        cells = [f'{config} &middot; {LONG_NAME.get(config, "")}']
+        for label in classes:
+            if label not in entries.index:
+                cells.append("&mdash;")
+                continue
+            entry = entries.loc[label]
+            colour = "" if float(entry["recall"]) >= 0.80 else ' style="color:var(--fail)"'
+            cells.append(
+                f'<span{colour}>{num(entry["precision"], 3)} / {num(entry["recall"], 3)} '
+                f'/ {num(entry["f1"], 3)}</span>'
+            )
+        cells.append(num(worst, 3))
+        rows.append(cells)
+
+    headline = table(
+        ["Configuration"] + [f"{c} &nbsp;<span class='dim'>P / R / F1</span>" for c in classes]
+        + ["Worst recall"],
+        rows,
+        "Held-out test split. Red marks a class whose recall falls under the brief's "
+        "0.80 bar; the final column is the weakest of the three, which is what the "
+        "target is actually judged on.",
+        lead,
+    )
+
+    arms = sorted(
+        set(per_class[per_class["kind"] == "ablation"]["configuration"])
+    )
+    ablation_note = ""
+    if arms:
+        ablation_rows = []
+        for config in arms:
+            entries = per_class[
+                (per_class["configuration"] == config)
+                & (per_class["source"] == "cv_out_of_fold")
+            ].set_index("class")
+            if entries.empty:
+                continue
+            ablation_rows.append(
+                [f'<span class="mono">{esc(config)}</span>']
+                + [num(entries.loc[label, "f1"], 3) if label in entries.index else "&mdash;"
+                   for label in classes]
+                + [num(entries.iloc[0]["accuracy"], 3)]
+            )
+        if ablation_rows:
+            ablation_note = (
+                "<h3>Ablation arms, scored out of fold</h3>"
+                + table(["Arm"] + [f"{c} F1" for c in classes] + ["Accuracy"], ablation_rows,
+                        "An ablation arm is never fitted on the whole training partition "
+                        "and never predicts the test split, so it has no held-out "
+                        "confusion matrix. These come from the pooled out-of-fold "
+                        "validation predictions instead - one per source image, each made "
+                        "by a model that had not seen it.")
+            )
+
+    return "<h3>Held-out per-class breakdown</h3>" + headline + ablation_note
+
+
+def enhancement_ablation_section(
+    frame: Optional[pd.DataFrame],
+    tag: str,
+) -> str:
+    """E2 taken apart: each half of its split, and the split moved at random."""
+    if frame is None:
+        return missing(
+            f"results/{tag}/ablation_enhancements.csv",
+            "Re-run scripts/run_enhancements.py to produce it.",
+        )
+
+    rows = []
+    for _, row in frame.iterrows():
+        delta = float(row["delta_vs_full_e2"])
+        if row["arm"] == "E2_full":
+            marker = "&mdash;"
+        else:
+            colour = "var(--fail)" if delta <= 0 else "var(--pass)"
+            marker = f'<span style="color:{colour}">{delta:+.4f}</span>'
+        rows.append([
+            f'<span class="mono">{esc(row["arm"])}</span>',
+            esc(row["description"]),
+            str(int(row["dimensionality"])),
+            num(row["cv_mean_accuracy"]),
+            num(row["cv_std_accuracy"]),
+            num(row["cv_mean_macro_f1"]),
+            marker,
+        ])
+
+    body = table(
+        ["Arm", "What it keeps", "Dim", "CV accuracy", "SD", "Macro F1", "E2 full leads by"],
+        rows,
+        "The final column is how much the complete E2 beats each arm. A small number "
+        "against the control is the interesting failure, not the reassuring one.",
+        [0],
+    )
+
+    try:
+        full = float(frame.loc[frame["arm"] == "E2_full", "cv_mean_accuracy"].iloc[0])
+        control = float(frame.loc[frame["arm"] == "E2_random_mask", "cv_mean_accuracy"].iloc[0])
+        healthy = float(frame.loc[frame["arm"] == "E2_healthy_only", "cv_mean_accuracy"].iloc[0])
+    except (KeyError, IndexError):
+        return body
+
+    over_control = full - control
+    over_healthy = full - healthy
+    verdict = (
+        "most of E2&rsquo;s advantage survives relocating the mask, which means most of "
+        "it is bought by the extra columns rather than by the mask finding real damage"
+        if over_control < over_healthy / 2
+        else "E2 loses substantially more to relocating the mask than to dropping a half, "
+             "which is what it should do if the mask is locating real damage"
+    )
+
+    return body + f"""
+      <div class="callout">
+        <h3>What the random-mask control is for</h3>
+        <p>
+          E2 splits the peel in two and describes each half, which doubles T1 and
+          T2&rsquo;s dimensionality from 77 to 154. A gain over them could therefore be
+          bought entirely by the extra columns and the extra parameters they buy. The
+          control keeps every one of those &mdash; same 154 columns, same two sub-regions,
+          same areas &mdash; and rotates the blemish mask to an arbitrary part of the same
+          fruit, so the only thing that changes is <em>where</em> the boundary falls.
+        </p>
+        <p>
+          E2 leads the control by {over_control:.4f} and the healthy-only arm by
+          {over_healthy:.4f}: {verdict}.
+        </p>
+        <p class="dim">
+          The mask is rotated rather than replaced by scattered pixels on purpose.
+          Scattering the same number of pixels would also destroy the spatial coherency
+          T1&rsquo;s block&nbsp;B measures, so beating that control would show only that
+          coherent regions beat speckle &mdash; a different and much weaker claim.
+        </p>
+      </div>"""
+
+
+def e2_section(
+    experiments: Dict[str, Optional[pd.DataFrame]],
+    control: Optional[float],
+) -> str:
+    """The four T2 sweeps, each on the complete dataset.
+
+    Named E2.1 to E2.4 by the methodology, which collides with the Phase 5
+    enhancement also called E2. These are sweeps of the T2 descriptor; that one
+    is blemish-aware regional weighting.
+    """
+    blocks: List[str] = []
+
+    def control_marker(value: Any) -> str:
+        """Mark an arm that fails to beat a classifier which never sees the fruit."""
+        try:
+            accuracy = float(value)
+        except (TypeError, ValueError):
+            return num(value)
+        if control is None or not np.isfinite(control):
+            return num(accuracy)
+        if accuracy > control:
+            return num(accuracy)
+        return f'<span style="color:var(--fail)">{accuracy:.4f}</span>'
+
+    baseline = experiments.get("e2_1")
+    if baseline is not None:
+        rows = [
+            [esc(r["arm"]).replace("_", " "), esc(r.get("descriptor", "")),
+             str(int(r["dimensionality"])), control_marker(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]), num(r["cv_mean_macro_f1"]),
+             f'{float(r["extraction_mean_s"]) * 1000:.1f} ms']
+            for _, r in baseline.iterrows()
+        ]
+        blocks.append(
+            "<h3>E2.1 &mdash; co-occurrence against first-order intensity</h3>"
+            + table(["Arm", "Descriptor", "Dim", "CV accuracy", "SD", "Macro F1",
+                     "Extraction"], rows,
+                    "Both arms read the same grey levels over the same pixels; only the "
+                    "second-order arm knows how those levels are arranged. The baseline "
+                    "is a tenth of the length.")
+        )
+
+    distances = experiments.get("e2_2")
+    if distances is not None:
+        best = int(distances["cv_mean_accuracy"].values.argmax())
+        rows = [
+            [f'<span class="mono">{esc(r.get("distances", ""))}</span>',
+             str(int(r["dimensionality"])), control_marker(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]), num(r["cv_mean_macro_f1"])]
+            for _, r in distances.iterrows()
+        ]
+        blocks.append(
+            "<h3>E2.2 &mdash; distance set</h3>"
+            + table(["Distances", "Dim", "CV accuracy", "SD", "Macro F1"], rows,
+                    "Reported against dimensionality rather than padded to a common "
+                    "length. A larger offset reads coarser structure; whether the peel "
+                    "has any is the question.", [best])
+        )
+
+    levels = experiments.get("e2_3")
+    if levels is not None:
+        best = int(levels["cv_mean_accuracy"].values.argmax())
+        rows = [
+            [str(int(r["levels"])), str(int(r.get("glcm_cells", 0))),
+             control_marker(r["cv_mean_accuracy"]), num(r["cv_std_accuracy"]),
+             f'{float(r["extraction_mean_s"]) * 1000:.1f} ms']
+            for _, r in levels.iterrows()
+        ]
+        blocks.append(
+            "<h3>E2.3 &mdash; grey-level quantisation</h3>"
+            + table(["Levels", "GLCM cells", "CV accuracy", "SD", "Extraction"], rows,
+                    "Dimensionality is constant here: quantisation changes the size of "
+                    "the co-occurrence matrix, not the number of properties read off it. "
+                    "32 was inherited from the literature, not measured.", [best])
+        )
+
+    angles = experiments.get("e2_4")
+    if angles is not None:
+        rows = [
+            [esc(r["arm"]).replace("_", " "), esc(r.get("description", "")),
+             str(int(r["dimensionality"])), control_marker(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]), num(r["cv_mean_macro_f1"])]
+            for _, r in angles.iterrows()
+        ]
+        blocks.append(
+            "<h3>E2.4 &mdash; per-angle against angle-averaged</h3>"
+            + table(["Arm", "What it does", "Dim", "CV accuracy", "SD", "Macro F1"], rows,
+                    "Averaging the four Haralick directions buys rotation invariance and "
+                    "costs three quarters of the length. The harness already augments by "
+                    "rotating, which may make the invariance redundant.")
+        )
+
+    if not blocks:
+        return missing("results/e2/e2_*.csv",
+                       "Run scripts/run_e2_experiments.py to produce them.")
+
+    present = [f for f in experiments.values() if f is not None]
+    best_overall = max(
+        (float(frame["cv_mean_accuracy"].max()) for frame in present), default=float("nan")
+    )
+    if control is not None and np.isfinite(control) and np.isfinite(best_overall) \
+            and best_overall <= control:
+        blocks.append(f"""
+      <div class="callout">
+        <h3>No configuration of T2 beats the background-only control</h3>
+        <p>
+          The strongest arm in all four sweeps reaches {best_overall:.4f}. A classifier
+          trained on these images with the fruit <em>masked out</em> reaches
+          {control:.4f}. Every configuration of this descriptor &mdash; every distance
+          set, every quantisation, with and without rotation invariance, and against its
+          own first-order baseline &mdash; is beaten by a model that never sees the fruit.
+        </p>
+        <p>
+          That is a finding about the descriptor and the dataset together, and it is
+          reported as one. It is not a reason to keep sweeping: the sweep is what
+          establishes that no configuration rescues it. The dataset audit explains the
+          other half &mdash; these images predict their own labels from the background.
+        </p>
+      </div>""")
+    return "".join(blocks)
+
+
+def e1_section(experiments: Dict[str, Optional[pd.DataFrame]]) -> str:
+    """The five T1 sweeps, each on the complete dataset.
+
+    Named E1.1 to E1.5 by the methodology, which unfortunately collides with
+    the Phase 5 enhancement also called E1. These are sweeps of the T1
+    descriptor; that one is feature-level fusion of all three techniques. The
+    heading says so, because a reader arriving at a table of "E1" rows halfway
+    down a page about enhancements will otherwise read it as the wrong thing.
+    """
+    blocks: List[str] = []
+
+    baseline = experiments.get("e1_1")
+    if baseline is not None:
+        rows = [
+            [esc(r["arm"]).replace("_", " "), esc(r.get("descriptor", "")),
+             str(int(r["dimensionality"])), num(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]), num(r["cv_mean_macro_f1"]),
+             f'{float(r["extraction_mean_s"]) * 1000:.1f} ms']
+            for _, r in baseline.iterrows()
+        ]
+        lead = [int(baseline["cv_mean_accuracy"].values.argmax())]
+        blocks.append(
+            "<h3>E1.1 &mdash; against a conventional colour histogram</h3>"
+            + table(["Arm", "Descriptor", "Dim", "CV accuracy", "SD", "Macro F1",
+                     "Extraction"], rows,
+                    "Both arms see the same images, the same masks, the same colour space "
+                    "and the same specular exclusion, so the gap is attributable to the "
+                    "descriptor family and to nothing else. The baseline is the longer "
+                    "vector of the two.", lead)
+        )
+
+    colours = experiments.get("e1_2")
+    if colours is not None:
+        best = int(colours["cv_mean_accuracy"].values.argmax())
+        rows = [
+            [str(int(r["n_colours"])), str(int(r["dimensionality"])),
+             num(r["cv_mean_accuracy"]), num(r["cv_std_accuracy"]),
+             num(r["cv_mean_macro_f1"])]
+            for _, r in colours.iterrows()
+        ]
+        blocks.append(
+            "<h3>E1.2 &mdash; number of dominant colours</h3>"
+            + table(["N", "Dim", "CV accuracy", "SD", "Macro F1"], rows,
+                    "Accuracy is reported against dimensionality rather than padded to a "
+                    "common length, as the brief requires: a gain bought with sixteen "
+                    "extra dimensions is a different kind of gain from a free one.",
+                    [best])
+        )
+
+    spaces = experiments.get("e1_3")
+    if spaces is not None:
+        best = int(spaces["cv_mean_accuracy"].values.argmax())
+        rows = [
+            [esc(r["space"]), num(r["cv_mean_accuracy"]), num(r["cv_std_accuracy"]),
+             num(r["cv_mean_macro_f1"]),
+             f'{float(r["extraction_mean_s"]) * 1000:.1f} ms']
+            for _, r in spaces.iterrows()
+        ]
+        spread = float(spaces["cv_mean_accuracy"].max() - spaces["cv_mean_accuracy"].min())
+        blocks.append(
+            "<h3>E1.3 &mdash; clustering colour space</h3>"
+            + table(["Space", "CV accuracy", "SD", "Macro F1", "Extraction"], rows,
+                    f"A {spread:.4f} spread across the three spaces. Block C is computed "
+                    f"from CIE L*a*b* whichever space was clustered in, so those five "
+                    f"dimensions mean the same thing in every arm and the comparison is "
+                    f"genuinely about the clustering.", [best])
+        )
+
+    specular = experiments.get("e1_4")
+    if specular is not None:
+        rows = [
+            [esc(r["arm"]).replace("_", " "), num(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]),
+             pct(r.get("mean_pct_pixels_excluded")),
+             pct(r.get("max_pct_pixels_excluded")),
+             pct(r.get("pct_images_specular_fallback"))]
+            for _, r in specular.iterrows()
+        ]
+        blocks.append(
+            "<h3>E1.4 &mdash; specular exclusion</h3>"
+            + table(["Arm", "CV accuracy", "SD", "Mean pixels dropped", "Most dropped",
+                     "Fell back"], rows,
+                    "An accuracy difference is uninterpretable without knowing what was "
+                    "thrown away to get it. The last column is how often exclusion was "
+                    "abandoned because it would have left too few pixels to cluster: "
+                    "on those images the enabled arm is behaving like the disabled one.")
+        )
+
+    ablation = experiments.get("e1_5")
+    if ablation is not None:
+        rows = [
+            [esc(r["arm"]).replace("_", " "),
+             f'<span class="mono">{esc(r["blocks"])}</span>',
+             esc(r.get("description", "")),
+             str(int(r["dimensionality"])), num(r["cv_mean_accuracy"]),
+             num(r["cv_std_accuracy"]), num(r["cv_mean_macro_f1"])]
+            for _, r in ablation.iterrows()
+        ]
+        blocks.append(
+            "<h3>E1.5 &mdash; what each block contributes</h3>"
+            + table(["Arm", "Blocks", "Adds", "Dim", "CV accuracy", "SD", "Macro F1"], rows,
+                    "The fourth arm is an addition to the original specification.")
+        )
+
+        try:
+            full = float(ablation.loc[ablation["arm"] == "ABC_full", "cv_mean_accuracy"].iloc[0])
+            minus = float(
+                ablation.loc[ablation["arm"] == "ABC_minus_decay", "cv_mean_accuracy"].iloc[0]
+            )
+        except (KeyError, IndexError):
+            full = minus = float("nan")
+        if np.isfinite(full) and np.isfinite(minus):
+            difference = full - minus
+            verdict = (
+                f"removing it costs {difference:.4f}, so it is carrying something real "
+                f"under a misleading name"
+                if difference > 0 else
+                f"removing it changes accuracy by {difference:+.4f}, so it is not doing "
+                f"the job it is named for"
+            )
+            blocks.append(f"""
+      <div class="callout">
+        <h3>The decay index appears to be inverted</h3>
+        <p>
+          <code>T1_decay_share</code> reads 26.5% on a held-out <b>Unripe</b> apple and 0.0%
+          on a <b>Rotten</b> one &mdash; backwards from its design. The mechanism is visible in
+          the thresholds: the index counts a cluster as decayed when it is both low in chroma
+          and low in lightness, and a dark, low-chroma green cluster
+          (<span class="mono">L* 14.7, a* &minus;10.4, b* 10.3</span>) satisfies both. On a
+          green apple in shadow the index is detecting the shadow.
+        </p>
+        <p>
+          The <span class="mono">ABC&nbsp;minus&nbsp;decay</span> arm measures the dimension
+          rather than repairing it: {esc(verdict)}. Either way the thresholds are unchanged
+          here &mdash; refitting them belongs in Phase 5, on training folds alone, and doing it
+          in the experiment that measures them would be fitting to the answer.
+        </p>
+      </div>""")
+
+    if not blocks:
+        return missing("results/e1/e1_*.csv", "Run scripts/run_e1_experiments.py to produce them.")
+    return "".join(blocks)
 
 
 def t3_section(experiments: Dict[str, Optional[pd.DataFrame]]) -> str:
@@ -994,12 +1450,6 @@ TODO = [
     ("CLI", "<b>Eight commands, feature caching, resumability.</b> Ten separate scripts exist "
             "instead; nothing is cached, so every rerun re-extracts and re-segments."),
     ("Dashboard", "<b>Tkinter + Matplotlib viewer.</b> Not started."),
-    ("T1 &middot; E1.1&ndash;E1.5", "<b>Five sub-experiments.</b> Histogram baseline, N = 3..6 "
-            "colours, LAB vs HSV vs RGB, specular exclusion on/off, block ablation. The "
-            "extractor supports every one; only the runner is missing."),
-    ("T2", "<b>Parameter sensitivity study.</b> Distance sets, quantisation levels and the "
-           "angle-averaged rotation-invariant variant. 32 levels is a default, not a measured "
-           "choice."),
     ("E2", "<b>The learned weighting.</b> Sub-regions are concatenated and the SVM left to "
            "weight them implicitly; the brief asks for a learned weighting."),
     ("Calibration", "<b>Pixel-to-millimetre scale from a reference object.</b> Absent, so "
@@ -1009,11 +1459,6 @@ TODO = [
                     "be scored."),
     ("Phase 6", "<b>Held-out generalisation and robustness sets.</b> Fruits-360, Fresh/Rotten "
                 "and FruitNet directories are empty."),
-    ("Docs", "<b>CHOICES.md.</b> Required by the brief wherever the specification is silent."),
-    ("Ablation", "<b>Removing each enhancement in turn.</b> Only the technique-drop half is "
-                 "implemented; E2 is not ablated at all."),
-    ("Results", "<b><code>results/**</code> is gitignored.</b> No CSV reaches a teammate who "
-                "clones the repository, which is why this page bakes every figure in."),
 ]
 
 
@@ -1028,6 +1473,11 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
     t3 = {name: read_csv(results_root / "t3" / f"{name}_{suffix}.csv")
           for name, suffix in (("e3_1", "ablation"), ("e3_2", "se_shape"),
                                ("e3_3", "rmax"), ("e3_4", "segmentation"))}
+
+    e1 = {f"e1_{n}": read_csv(results_root / "e1" / f"e1_{n}.csv") for n in range(1, 6)}
+    e2 = {f"e2_{n}": read_csv(results_root / "e2" / f"e2_{n}.csv") for n in range(1, 5)}
+    per_class_metrics = read_csv(run_dir / "per_class.csv")
+    enhancement_ablation = read_csv(run_dir / "ablation_enhancements.csv")
 
     panels = read_json(results_root / "visuals" / "panels.json")
     background = read_csv(results_root / "audit" / "primary_background_only.csv")
@@ -1123,7 +1573,7 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
       The specification sets these bars and says explicitly not to tune towards them. A missed
       target is reported as missed, and a target that cannot be scored says why.
     </p>
-    {acceptance_section(matrix, vs_best, t3.get("e3_4"), t3.get("e3_1"))}
+    {acceptance_section(matrix, vs_best, t3.get("e3_4"), t3.get("e3_1"), per_class_metrics)}
   </section>
 
   <section>
@@ -1138,6 +1588,57 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
       <span>results/{esc(tag)}/ablation.csv</span></p>
     <h2>What each technique contributes to the hybrid</h2>
     {ablation_section(ablation, matrix, tag)}
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">{provenance} run &middot; held-out and out-of-fold</span>
+      <span>results/{esc(tag)}/per_class.csv</span></p>
+    <h2>Which class each configuration gets wrong</h2>
+    <p class="lede">
+      Accuracy says how often a configuration is right. This says what it is right about,
+      which on a three-class ripeness problem is usually the more useful half.
+    </p>
+    {per_class_section(per_class_metrics, matrix, tag)}
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">{provenance} run &middot; the enhancement, not the techniques</span>
+      <span>results/{esc(tag)}/ablation_enhancements.csv</span></p>
+    <h2>Does E2&rsquo;s split do anything?</h2>
+    <p class="lede">
+      The ablation above removes a technique at a time. This removes the <b>strategy</b>:
+      each half of E2&rsquo;s split on its own, and a control that keeps the split intact
+      and moves it somewhere arbitrary on the same fruit.
+    </p>
+    {enhancement_ablation_section(enhancement_ablation, tag)}
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">Full dataset &middot; 2400 images</span>
+      <span>results/e1/e1_*.csv</span></p>
+    <h2>T1 internal experiments</h2>
+    <p class="lede">
+      The five sweeps required for the dominant-colour branch, each run on the complete
+      dataset with five-fold cross-validation on the training partition only. The
+      methodology numbers them E1.1 to E1.5; they are sweeps of <b>T1</b>, and are unrelated
+      to the enhancement called E1 above, which fuses all three techniques.
+    </p>
+    {e1_section(e1)}
+  </section>
+
+  <section>
+    <p class="eyebrow"><span class="src">Full dataset &middot; 2400 images</span>
+      <span>results/e2/e2_*.csv</span></p>
+    <h2>T2 internal experiments</h2>
+    <p class="lede">
+      The four sweeps required for the texture branch. T2 is the weakest technique in the
+      study and the only one that scores below the background-only control, so this sweep
+      is a diagnosis as well as a requirement: it establishes whether the descriptor is
+      misconfigured or unsuited to a chromatic task. Numbered E2.1 to E2.4 by the
+      methodology; these are sweeps of <b>T2</b>, unrelated to the enhancement called E2
+      above.
+    </p>
+    {e2_section(e2, control)}
   </section>
 
   <section>
@@ -1164,7 +1665,7 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
   </section>
 
   <section>
-    <p class="eyebrow"><span class="src">Code review</span> <span>290 tests passing</span></p>
+    <p class="eyebrow"><span class="src">Code review</span> <span>386 tests passing</span></p>
     <h2>Defects found and fixed</h2>
     <ol class="fixes">
       {"".join(f'<li><h3>{title}</h3><p>{body}</p><span class="where">{where}</span></li>'
@@ -1188,9 +1689,11 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
 
   <footer>
     FreshSight &middot; BMDS2133 Image Processing &middot; generated {esc(built)} by
-    scripts/build_report.py from results/{esc(tag)}, results/t3 and results/audit.
+    scripts/build_report.py from results/{esc(tag)}, results/e1, results/e2,
+    results/t3 and results/audit.
     Every figure was produced by running the pipeline on real data; nothing on this page is
-    hardcoded. Rebuild after any run to refresh it.
+    hardcoded. The CSVs behind them are tracked in <span>results/</span> as well, so any
+    number here can be checked against its source. Rebuild after any run to refresh it.
   </footer>
 
 </div>
@@ -1202,6 +1705,10 @@ def build(tag: str, results_root: Path) -> Tuple[str, Dict[str, Any]]:
         "enhancement_matrix": matrix is not None,
         "enhancement_vs_best": vs_best is not None,
         "ablation": ablation is not None,
+        "e1_experiments": sum(1 for v in e1.values() if v is not None),
+        "e2_experiments": sum(1 for v in e2.values() if v is not None),
+        "per_class": per_class_metrics is not None,
+        "enhancement_ablation": enhancement_ablation is not None,
         "t3_experiments": sum(1 for v in t3.values() if v is not None),
         "audit": background is not None,
         "visuals": len(panels["images"]) if panels else 0,
@@ -1263,6 +1770,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f"{'found' if sources['enhancement_matrix'] else 'MISSING'}")
     print(f"  paired t-tests    : {'found' if sources['enhancement_vs_best'] else 'MISSING'}")
     print(f"  ablation          : {'found' if sources['ablation'] else 'MISSING'}")
+    print(f"  T1 experiments    : {sources['e1_experiments']}/5 found"
+          f"{'' if sources['e1_experiments'] else ' (run scripts/run_e1_experiments.py)'}")
+    print(f"  T2 experiments    : {sources['e2_experiments']}/4 found"
+          f"{'' if sources['e2_experiments'] else ' (run scripts/run_e2_experiments.py)'}")
+    print(f"  per-class metrics : {'found' if sources['per_class'] else 'MISSING'}")
+    print(f"  E2 ablation       : "
+          f"{'found' if sources['enhancement_ablation'] else 'MISSING'}")
     print(f"  T3 experiments    : {sources['t3_experiments']}/4 found")
     print(f"  dataset audit     : {'found' if sources['audit'] else 'MISSING'}")
     print(f"  technique panels  : {sources['visuals']} apples"

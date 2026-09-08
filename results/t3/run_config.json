@@ -1,0 +1,55 @@
+{
+  "mode": "FULL",
+  "seed": 42,
+  "per_class": null,
+  "augmented": false,
+  "n_images": 2400,
+  "n_training_records": 1920,
+  "n_training_rows": 1886,
+  "n_excluded_by_segmentation": 34,
+  "cv_folds": 5,
+  "test_split_touched": false,
+  "dataset_root": "N:\\Degree\\IP\\Assignment\\ImageProcessing\\data\\primary",
+  "dataset_audit_verdict": "NOT SUITABLE - see README; 74.0% background-only against a 33.3% chance level. Relative comparisons between these arms are unaffected; absolute accuracies carry that ceiling.",
+  "segmentation_method": "grabcut",
+  "default_config": {
+    "r_max": 7,
+    "se_shape": "ellipse",
+    "tophat_radius": 9,
+    "min_blemish_area": 15,
+    "blemish_method": "bth_otsu",
+    "fixed_threshold": 30,
+    "exclude_poles": false,
+    "pole_fraction": 0.15,
+    "hue_deviation": 20.0,
+    "saturation_deviation": 60.0,
+    "value_deviation": 60.0
+  },
+  "variants": {
+    "baseline": {},
+    "se_rect": {
+      "se_shape": "rect"
+    },
+    "se_cross": {
+      "se_shape": "cross"
+    },
+    "rmax_5": {
+      "r_max": 5
+    },
+    "rmax_9": {
+      "r_max": 9
+    },
+    "rmax_11": {
+      "r_max": 11
+    },
+    "seg_fixed": {
+      "blemish_method": "fixed"
+    },
+    "seg_hue": {
+      "blemish_method": "hue_deviation"
+    }
+  },
+  "e3_4_annotations_available": false,
+  "elapsed_seconds": 713.7,
+  "mode_note": "All 2400 images, augmentation off. An earlier build of this script mislabelled such a run PILOT; the data was never reduced."
+}
