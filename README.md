@@ -659,17 +659,18 @@ low-leakage subset as a sensitivity check.*
 
 ### Phases 2–6
 
-Not yet implemented. Each phase is built and verified in turn.
+Each phase is built and verified in turn. Status below is against what is
+actually on disk in `results/`, not against what has been coded.
 
 | Phase | Deliverable | Status |
 | :-- | :-- | :-- |
 | 1 | Shared harness, evaluation module, visual sanity check | **Complete** |
 | 2 | The three feature extractors, with unit tests | **Complete** |
-| 3 | Individual benchmarks | Driver built (`scripts/run_benchmarks.py`); full run pending |
-| 4 | Comparison, paired t-tests, ranking | Code built (`compare.py`, `scripts/run_comparison.py`); waiting on the Phase 3 run |
-| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | Drivers built for T1 (`run_e1_experiments.py`), T2 (`run_e2_experiments.py`) and T3; full runs pending |
-| 5b | Enhancements E1/E2/E3 and the hybrid | Code built (`enhance.py`, `scripts/run_enhancements.py`); waiting on the full run |
-| 6 | Held-out generalisation and robustness sets | Pending |
+| 3 | Individual benchmarks | **Complete.** `results/phase3`, `mode: FULL`, 7542 augmented training rows, seed 42. Earlier pilots are retained at `results/pilot` (100/class) and `results/pilot3` (300/class) and are indicative only. |
+| 4 | Comparison, paired t-tests, ranking | **Complete.** `results/phase3/comparison_matrix.csv`, `pairwise_ttests.csv` and `ranking.txt`, Holm-adjusted over 5 folds. T1 ranks first and every pairwise gap is significant at alpha 0.05. |
+| 5 | Sub-comparisons (colour space, bins, GLCM parameters) | **Complete.** Full runs on disk for T1 (`results/e1`), T2 (`results/e2`) and T3 (`results/t3`), all `mode: FULL`, 1886 training rows, unaugmented, seed 42. |
+| 5b | Enhancements E1/E2/E3 and the hybrid | **Complete.** `results/phase5`, `mode: FULL`, 7542 augmented training rows, seed 42. |
+| 6 | Held-out generalisation and robustness sets | **Pending — the only genuinely outstanding phase.** |
 
 ---
 
@@ -692,18 +693,47 @@ read -> (augment, training only) -> preprocess -> segment -> extract features
 
 **Segmentation** ([`harness.segment_fruit`](harness.py))
 
-4. Otsu threshold on the HSV V channel.
-5. Morphological closing, 5 × 5 elliptical element.
-6. Keep the largest connected component only.
-7. Fill interior holes, so the mask is the solid fruit silhouette and a dark
-   blemish is not punched out of the region it is measured against (see
-   deviation 2 below). Disable with `segmentation.fill_holes: false`.
-8. Return the mask, its bounding box and its outer contour.
-9. Flag any mask covering < 5% or > 95% of the frame as a **segmentation
-   failure**, log it, and — under the default `on_failure: "exclude"` policy —
-   drop it rather than pass a broken mask to a feature extractor. Because
-   segmentation is shared, the same images are dropped for every technique, so
-   the comparison stays like-for-like.
+`config.json` sets `segmentation.method: "grabcut"`, and every reported run used
+it. The `otsu_v` path — an Otsu threshold on the HSV V channel, with
+`segmentation.polarity: "auto"` picking whichever side of the threshold touches
+the frame border least — is still implemented and selectable, and is kept for
+the method comparison in the write-up. It is not what produced the numbers below.
+
+4. Build a **seeded GrabCut label image**. The frame border (6% of the shorter
+   side) is marked definite background, a central ellipse at 28% of the frame
+   definite foreground, and the ellipse between them (78%) probable foreground.
+   A bare initialising rectangle — the usual recipe — returned an empty mask for
+   three images in twelve here, because a fruit that fills the frame leaves no
+   background inside the rectangle to model.
+5. Reseed OpenCV's global RNG from `SEED` immediately before the call, then run
+   `cv2.grabCut` for 5 iterations with `GC_INIT_WITH_MASK`. GrabCut fits its
+   colour models with k-means, which draws its initial centres from that global
+   generator; without the reseed two techniques handed the same image would be
+   described from different masks, which is the one difference between
+   techniques this study exists to exclude.
+6. Take `GC_FGD` and `GC_PR_FGD` together as the foreground proposal.
+7. Morphological closing, 5 × 5 elliptical element; keep the largest connected
+   component only; then fill interior holes, so the mask is the solid fruit
+   silhouette and a dark blemish is not punched out of the region it is measured
+   against (see deviation 2 below). Disable with `segmentation.fill_holes: false`.
+8. Flag a mask that grew to less than **1.5×** its seeded foreground core as
+   degenerate. Because the core is marked definite foreground, GrabCut can never
+   return an empty mask, so the minimum-coverage bound alone cannot catch a
+   frame holding no fruit; a mask that barely exceeds the ellipse the harness
+   drew is the equivalent signal. Uniform frames grow by about 1.05×, a real
+   fruit by several times.
+9. Return the mask, its bounding box and its outer contour, and flag any mask
+   covering < 5% or > 95% of the frame as a **segmentation failure**. Log it
+   and — under the default `on_failure: "exclude"` policy — drop it rather than
+   pass a broken mask to a feature extractor. Because segmentation is shared,
+   the same images are dropped for every technique, so the comparison stays
+   like-for-like.
+
+Otsu is still genuinely load-bearing elsewhere: T3 thresholds its black top-hat
+response with `THRESH_OTSU` to detect blemishes
+([`features/t3_morphological.py`](features/t3_morphological.py), `_segment_blemishes`).
+That is a per-image threshold over a morphological response, unrelated to this
+foreground/background split.
 
 **Partition** ([`harness.stratified_split`](harness.py), [`harness.make_cv`](harness.py))
 

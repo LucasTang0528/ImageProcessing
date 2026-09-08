@@ -9,9 +9,7 @@ called Gap 1.
 ====  ======================================================================
 E1    Feature-level fusion. Standardise the three vectors, concatenate them
       (37 + 40 + 36 = 113 dimensions), and reduce with PCA retaining 95% of
-      the variance before the shared SVM. The report text quotes 111/34-D from
-      an earlier T3 design; the code follows the vectors the extractors
-      actually emit.
+      the variance before the shared SVM.
 E2    Blemish-aware regional weighting. The T3 blemish mask splits the fruit
       into a healthy and a blemished sub-region. T1 and T2 are recomputed over
       each sub-region separately and concatenated, so a localised defect

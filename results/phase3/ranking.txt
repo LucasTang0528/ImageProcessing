@@ -1,0 +1,9 @@
+Ranking by cross-validated accuracy (5-fold, training partition):
+  1. T1     0.9046 +/- 0.0100  test acc 0.9487
+  2. T3     0.7588 +/- 0.0226  test acc 0.7692
+  3. T2     0.6235 +/- 0.0309  test acc 0.6132
+
+Best technique: T1 (+0.1458 over T3, paired t = 19.508, p = 0.0000, Holm p = 0.0001) -> significant at alpha = 0.05
+
+Target (>= 80% for the best individual technique): T1 at 0.9046 clears it.
+Background-only control: 0.7396. T1 is +0.1650 relative to a classifier that never sees the fruit.

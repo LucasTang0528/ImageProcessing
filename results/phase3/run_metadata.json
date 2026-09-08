@@ -1,0 +1,15 @@
+{
+  "mode": "FULL",
+  "per_class": "all",
+  "augmentation": true,
+  "n_images": 2400,
+  "n_train_images": 1920,
+  "n_test_images": 480,
+  "techniques": [
+    "T1",
+    "T2",
+    "T3"
+  ],
+  "seed": 42,
+  "segmentation_method": "grabcut"
+}
