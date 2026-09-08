@@ -67,8 +67,19 @@ import pandas as pd  # noqa: E402
 
 from config import Config, get_config  # noqa: E402
 from data import ImageRecord, load_primary  # noqa: E402
-from evaluate import cross_validate_technique, save_dataframe  # noqa: E402
+from evaluate import (  # noqa: E402
+    classification_metrics,
+    cross_validate_technique,
+    print_report,
+    save_dataframe,
+)
 from features.base import FeatureExtractionError  # noqa: E402
+from selection import (  # noqa: E402
+    add_paired_differences,
+    criterion_agreement,
+    report_criterion_agreement,
+    select_winner,
+)
 from features.colour_histogram import ColourHistogramExtractor  # noqa: E402
 from features.t1_dominant_colour import DominantColourExtractor  # noqa: E402
 from harness import (  # noqa: E402
@@ -718,13 +729,44 @@ def evaluate_winner(
           f"by {selected_by}")
     print(f"    extracting test features for {key} only ...")
 
-    test = extract_all_variants(partition.test, {key: extractors[key]}, False, config)[key]
+    test_matrices, _ = extract_all_variants(
+        partition.test, {key: extractors[key]}, False, config
+    )
+    test = test_matrices[key]
     train = matrices[key]
-    if dropped:
+
+    # An E1.5 arm is a column selection over the baseline vector, not a
+    # separate extractor, so the winner has to be rebuilt the same way it was
+    # scored. Reproducing the selection here rather than trusting the recorded
+    # dimensionality means a block arm and its held-out evaluation cannot
+    # silently describe different feature sets.
+    blocks = str(getattr(winner, "blocks", "") or "")
+    if blocks and blocks != "ABC":
+        extractor = extractors["baseline"]
+        columns = block_columns(extractor)
+        decay = assert_block_layout(extractor)
+        selection_map = {
+            "A": columns["A"],
+            "AB": np.concatenate([columns["A"], columns["B"]]),
+            "ABC-decay": np.delete(np.arange(extractor.dim), decay),
+        }
+        if blocks not in selection_map:
+            raise KeyError(f"no column selection recorded for blocks={blocks!r}")
+        chosen = selection_map[blocks]
+        train = replace(train, X=train.X[:, chosen])
+        test = replace(test, X=test.X[:, chosen])
+    elif dropped:
         names = list(extractors[key].feature_names)
         keep = [i for i, n in enumerate(names) if n != dropped]
         train = replace(train, X=train.X[:, keep])
         test = replace(test, X=test.X[:, keep])
+
+    if train.X.shape[1] != int(winner.dimensionality):
+        raise AssertionError(
+            f"rebuilt the winner at {train.X.shape[1]} dimensions but it was "
+            f"scored at {int(winner.dimensionality)}; the held-out evaluation "
+            f"would not be of the arm that was selected"
+        )
 
     fitted = build_pipeline(config).fit(train.X, train.y)
     report = classification_metrics(
