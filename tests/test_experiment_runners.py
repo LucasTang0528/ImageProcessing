@@ -266,17 +266,38 @@ def test_extraction_times_are_recorded_per_row(matrices) -> None:
 # The test split is never extracted
 # --------------------------------------------------------------------------- #
 
-def _extraction_call_argument(module_path: Path) -> str:
-    """Return the name of the first argument passed to extract_all_variants."""
+def _extraction_call_arguments(module_path: Path) -> list[str]:
+    """Return the first argument of every extract_all_variants call, in order."""
     tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    found = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "extract_all_variants"
         ):
-            return ast.unparse(node.args[0])
-    raise AssertionError(f"{module_path.name} never calls extract_all_variants")
+            found.append(ast.unparse(node.args[0]))
+    if not found:
+        raise AssertionError(f"{module_path.name} never calls extract_all_variants")
+    return found
+
+
+def _enclosing_function(module_path: Path, call_name: str, argument: str) -> str:
+    """Return the function containing a given call, for locating the sweep's one exception."""
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == call_name
+                and node.args
+                and ast.unparse(node.args[0]) == argument
+            ):
+                return function.name
+    raise AssertionError(f"no call to {call_name}({argument}) found")
 
 
 def _assignment_source(module_path: Path, target: str) -> str:
@@ -300,9 +321,33 @@ def test_only_the_training_partition_is_ever_extracted(module: Path) -> None:
     what the driver does with the real partition. This checks the one call that
     could leak the test split, and checks what it is handed.
     """
-    argument = _extraction_call_argument(module)
-    assert argument == "training", (
-        f"{module.name} extracts from {argument!r}; it must extract from the "
-        f"training partition only"
-    )
+    arguments = _extraction_call_arguments(module)
+
+    # The sweep itself must never see the test split. Every arm is scored by
+    # cross-validation over the training partition, and an arm scored on
+    # held-out data would make that data a selection stage.
+    sweep_calls = [a for a in arguments if a != "partition.test"]
+    assert sweep_calls, f"{module.name} never extracts the training partition"
+    for argument in sweep_calls:
+        assert argument == "training", (
+            f"{module.name} extracts from {argument!r}; the sweep must extract "
+            f"from the training partition only"
+        )
     assert _assignment_source(module, "training") == "partition.train"
+
+    # Exactly one exception is permitted: the closing evaluation, which scores
+    # the already-selected arm once so the report has a held-out number. It is
+    # a confirmation, not a criterion - selection is closed before it runs - so
+    # it is pinned to that one function and to a single call rather than
+    # merely allowed.
+    held_out = [a for a in arguments if a == "partition.test"]
+    assert len(held_out) <= 1, (
+        f"{module.name} extracts the test partition {len(held_out)} times; at "
+        f"most one closing evaluation is permitted"
+    )
+    if held_out:
+        where = _enclosing_function(module, "extract_all_variants", "partition.test")
+        assert where == "evaluate_winner", (
+            f"{module.name} extracts the test partition inside {where!r}; only "
+            f"the closing evaluation may touch it"
+        )
